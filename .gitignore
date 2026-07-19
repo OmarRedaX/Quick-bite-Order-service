@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/
+CLAUDE.md
+.claude/settings.local.json
+
+# local experimentation scripts — not tracked
+play/
