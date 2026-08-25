@@ -9,6 +9,7 @@ import {startCoreEventsConsumer} from "./lib/core-events/consumer";
 import {attachWsServer} from "./lib/websocket/ws-server";
 import {container} from "./lib/di/container";
 import {TOKENS} from "./lib/di/tokens";
+import {registerOrderModuleCoreEventHandlers} from "./app/order/core-events.handlers";
 
 const app = createApp();
 const server = http.createServer(app);
@@ -29,6 +30,8 @@ server.listen(env.port, async () => {
     } catch (err) {
         logger.error("shard ping failed", {error: (err as Error).message});
     }
+
+    registerOrderModuleCoreEventHandlers();
 
     messageBroker
         .connect()

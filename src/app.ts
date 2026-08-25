@@ -13,7 +13,13 @@ export function createApp() {
     app.use(helmet());
     app.use(cors({origin: env.cors.origins, credentials: true}));
     app.set("query parser", "extended");
-    app.use(express.json());
+    // Stash the raw request body so the webhook handlers can verify HMAC
+    // signatures byte-for-byte over the original payload.
+    app.use(express.json({
+        verify: (req, _res, buf) => {
+            (req as any).rawBody = buf;
+        },
+    }));
     app.use(cookieParser());
     app.use(correlationId);
     app.use(resolveRegion);

@@ -36,10 +36,38 @@ const baseSchema = z.object({
     RABBITMQ_CORE_EVENTS_DLQ: z.string().default("order-service.core-events.dlq"),
     RABBITMQ_PREFETCH: z.string().default("32"),
 
+    // Outbound: order.events exchange consumed by analytics-service & friends
+    RABBITMQ_ORDER_EVENTS_EXCHANGE: z.string().default("order.events"),
+    OUTBOUND_EVENTS_DRAIN_TICK_SEC: z.string().default("2"),
+    OUTBOUND_EVENTS_BATCH_SIZE: z.string().default("100"),
+
     CORE_SERVICE_BASE_URL: z.string(),
     CORE_INTERNAL_API_KEY: z.string(),
 
     WS_HEARTBEAT_SEC: z.string().default("30"),
+
+    KASHIER_BASE_URL: z.string().default("https://test-api.kashier.io"),
+    KASHIER_FEP_BASE_URL: z.string().default("https://test-fep.kashier.io"),
+    KASHIER_MERCHANT_ID: z.string(),
+    KASHIER_API_KEY: z.string(),
+    KASHIER_SECRET_KEY: z.string(),
+    KASHIER_PAYMENT_TYPE: z.string().default("credit"),
+    KASHIER_RETURN_URL: z.string(),
+    KASHIER_FAIL_URL: z.string(),
+    KASHIER_WEBHOOK_URL: z.string(),
+    PAYMENT_SESSION_TIMEOUT_MIN: z.string().default("15"),
+    ONLINE_PAYMENT_REGIONS: z.string().default("eg"),
+
+    // Deliveries / agents
+    PRESENCE_STALE_SEC: z.string().default("300"),                       // 5 min — TTL on presence:meta:*
+    ASSIGNMENT_TICK_SEC: z.string().default("10"),                       // worker tick cadence
+    ASSIGNMENT_RADIUS_METERS: z.string().default("5000"),
+    ASSIGNMENT_CANDIDATES: z.string().default("5"),                      // top N agents per offer
+    ASSIGNMENT_OFFER_TTL_SEC: z.string().default("30"),                  // offer:order:* lifetime
+    ASSIGNMENT_CLAIM_TTL_SEC: z.string().default("300"),                 // claim:order:* lifetime
+    ASSIGNMENT_MAX_ATTEMPTS: z.string().default("3"),
+    ASSIGNMENT_BATCH: z.string().default("20"),                          // ready orders processed per tick
+    AGENT_EARNING_SHARE_BPS: z.string().default("8000"),                 // 80% of order.delivery_fee
 });
 
 const parsed = baseSchema.parse(process.env);
@@ -138,6 +166,12 @@ export const env = {
         prefetch: Number(parsed.RABBITMQ_PREFETCH),
     },
 
+    outboundEvents: {
+        exchange: parsed.RABBITMQ_ORDER_EVENTS_EXCHANGE,
+        drainTickSec: Number(parsed.OUTBOUND_EVENTS_DRAIN_TICK_SEC),
+        batchSize: Number(parsed.OUTBOUND_EVENTS_BATCH_SIZE),
+    },
+
     core: {
         baseUrl: parsed.CORE_SERVICE_BASE_URL,
         internalApiKey: parsed.CORE_INTERNAL_API_KEY,
@@ -145,5 +179,39 @@ export const env = {
 
     ws: {
         heartbeatSec: Number(parsed.WS_HEARTBEAT_SEC),
+    },
+
+    kashier: {
+        baseUrl: parsed.KASHIER_BASE_URL,
+        fepBaseUrl: parsed.KASHIER_FEP_BASE_URL,
+        merchantId: parsed.KASHIER_MERCHANT_ID,
+        apiKey: parsed.KASHIER_API_KEY,
+        secretKey: parsed.KASHIER_SECRET_KEY,
+        paymentType: parsed.KASHIER_PAYMENT_TYPE,
+        returnUrl: parsed.KASHIER_RETURN_URL,
+        failUrl: parsed.KASHIER_FAIL_URL,
+        webhookUrl: parsed.KASHIER_WEBHOOK_URL,
+    },
+
+    payments: {
+        sessionTimeoutMin: Number(parsed.PAYMENT_SESSION_TIMEOUT_MIN),
+        onlineRegions: new Set(
+            parsed.ONLINE_PAYMENT_REGIONS
+                .split(",")
+                .map((s) => s.trim().toLowerCase())
+                .filter((s) => s.length > 0),
+        ),
+    },
+
+    delivery: {
+        presenceStaleSec: Number(parsed.PRESENCE_STALE_SEC),
+        assignmentTickSec: Number(parsed.ASSIGNMENT_TICK_SEC),
+        radiusMeters: Number(parsed.ASSIGNMENT_RADIUS_METERS),
+        candidates: Number(parsed.ASSIGNMENT_CANDIDATES),
+        offerTtlSec: Number(parsed.ASSIGNMENT_OFFER_TTL_SEC),
+        claimTtlSec: Number(parsed.ASSIGNMENT_CLAIM_TTL_SEC),
+        maxAttempts: Number(parsed.ASSIGNMENT_MAX_ATTEMPTS),
+        batch: Number(parsed.ASSIGNMENT_BATCH),
+        agentEarningShareBps: Number(parsed.AGENT_EARNING_SHARE_BPS),
     },
 };

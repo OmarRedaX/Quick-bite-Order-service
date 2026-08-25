@@ -8,7 +8,7 @@ export function errorHandler(
     res: Response,
     _next: NextFunction,
 ) {
-    const appErr = err instanceof AppError ? err : new AppError(err.message ?? "Unknown error", 500, false);
+    const appErr = err instanceof AppError ? err : new AppError(err?.message ?? "Unknown error", 500, false);
     const operational = appErr.isOperational;
 
     logger.error(appErr.message, {

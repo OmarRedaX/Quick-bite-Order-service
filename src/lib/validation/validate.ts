@@ -1,6 +1,15 @@
 import {plainToInstance} from "class-transformer";
-import {validate} from "class-validator";
+import {validate, ValidationError} from "class-validator";
 import {AppError} from "../error/AppError";
+
+function flattenMessages(errors: ValidationError[]): string[] {
+    const out: string[] = [];
+    for (const e of errors) {
+        if (e.constraints) out.push(...Object.values(e.constraints));
+        if (e.children && e.children.length > 0) out.push(...flattenMessages(e.children));
+    }
+    return out;
+}
 
 export async function validateBody<T extends object>(
     cls: new () => T,
@@ -10,8 +19,8 @@ export async function validateBody<T extends object>(
     const errors = await validate(instance, {whitelist: true});
 
     if (errors.length > 0) {
-        const messages = errors.flatMap((e) => Object.values(e.constraints ?? {}));
-        throw new AppError(messages.join("\n"), 400);
+        const messages = flattenMessages(errors);
+        throw new AppError(messages.join("\n") || "Validation failed", 400);
     }
     return instance;
 }

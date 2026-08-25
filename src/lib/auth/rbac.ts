@@ -1,10 +1,23 @@
 import {Request, Response, NextFunction} from "express";
+import {TOKENS} from "../di/tokens";
+import {container} from "../di/container";
+import {PermissionCacheService} from "../rbac/permission-cache.service";
 import {NotAuthenticated} from "./errors";
 
-// Role constants kept minimal here; the permission lookup is wired later via a
-// cached projection from core-service (Phase 1+ handler).
 const SYSTEM_ADMIN = "system_admin";
 const RESTAURANT_USER = "restaurant_user";
+const DELIVERY_AGENT = "delivery_agent";
+
+/**
+ * Gate routes that may only be called by users with the `delivery_agent`
+ * system role. Same shape as requireRestaurantMember — guarantees the actor
+ * before the controller has to think about it.
+ */
+export function requireAgent(req: Request, res: Response, next: NextFunction) {
+    if (!req.user) return res.status(401).json({error: "User not authenticated"});
+    if (req.user.role !== DELIVERY_AGENT) return res.status(403).json({error: "Agent role required"});
+    next();
+}
 
 export interface RBACOptions {
     resource: string;
@@ -12,20 +25,29 @@ export interface RBACOptions {
     allowSystemAdmin?: boolean; // default true
 }
 
-/**
- * Middleware placeholder: until the permission-cache is wired (via an `app/rbac` module
- * or a lib-level permission client), this middleware enforces only the "system_admin
- * bypass" and rejects anything else with 403. Per-permission checks land in the module
- * phase that needs them.
- */
-export function rbac(_options: RBACOptions) {
-    return (req: Request, res: Response, next: NextFunction) => {
-        if (!req.user) throw NotAuthenticated;
-        const {allowSystemAdmin = true} = _options;
-        if (allowSystemAdmin && req.user.role === SYSTEM_ADMIN) return next();
-        // TODO(phase-1): wire permission-cache service for RESTAURANT_USER role.
-        if (req.user.role === RESTAURANT_USER) return next();
-        return res.status(403).json({error: "Permission denied"});
+export function rbac(options: RBACOptions) {
+    return async (req: Request, res: Response, next: NextFunction) => {
+        try {
+            if (!req.user) throw NotAuthenticated;
+            const {resource, action, allowSystemAdmin = true} = options;
+
+            if (allowSystemAdmin && req.user.role === SYSTEM_ADMIN) {
+                return next();
+            }
+
+            if (req.user.role === RESTAURANT_USER) {
+                const cache = container.resolve<PermissionCacheService>(TOKENS.PermissionCacheService);
+                const permissions = await cache.getPermissions(req.user.restaurantRole!);
+                if (!cache.hasPermission(permissions, resource, action)) {
+                    return res.status(403).json({error: "Permission denied"});
+                }
+                return next();
+            }
+
+            return res.status(403).json({error: "Permission denied"});
+        } catch (err) {
+            next(err);
+        }
     };
 }
 
@@ -48,7 +70,7 @@ export function requireBranchAccess(paramName: string = "branchId") {
 
         const branchId =
             Number(req.params[paramName]) || Number(req.query[paramName]);
-        if (!branchId) return next(); // endpoint doesn't scope to a specific branch
+        if (!branchId) return next();
 
         const userBranchIds = req.user?.branchIds ?? [];
         if (!userBranchIds.includes(branchId)) {
