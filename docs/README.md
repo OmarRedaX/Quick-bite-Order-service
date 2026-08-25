@@ -16,3 +16,11 @@ Read in this order on your first pass.
 |10 | [`business-logic/restaurant-finance.md`](./business-logic/restaurant-finance.md) | Balance/payout reads, admin payout recording.                |
 |11 | [`business-logic/rbac.md`](./business-logic/rbac.md)     | Permissions seeded in core, per-endpoint mapping, cached resolution.            |
 |12 | [`implementation-plan.md`](./implementation-plan.md)     | Sequenced build order with acceptance gates.                                   |
+
+## Local setup (verified)
+
+1. Create the per-region Postgres databases named in `.env` — hot (`DB_<region>_NAME`) and archive (`ARCHIVE_DB_<region>_NAME`) — for every region listed in `REGIONS`.
+2. Apply migrations per region: `REGION=eg npm run migrate` (repeat per region), or `npm run migrate:all` to run every configured region in one pass.
+3. `KASHIER_MERCHANT_ID`, `KASHIER_API_KEY`, `KASHIER_SECRET_KEY`, `KASHIER_RETURN_URL`, `KASHIER_FAIL_URL`, `KASHIER_WEBHOOK_URL` have no defaults in `env.ts` — the app will not boot without them. Kashier's session API also rejects non-`https` redirect/webhook URLs, even against the test sandbox.
+4. `npm run dev` (API) and `npm run worker` (assignment-tick + outbox-drain cron jobs) are separate processes; both need Postgres, Redis, and RabbitMQ reachable to start cleanly.
+5. `GET /api/health` pings every configured hot **and** archive shard and returns `503` if any one of them is unreachable.

@@ -88,7 +88,7 @@ Header: `Idempotency-Key` (required, `idempotency({strict: true})` middleware).
 6. **In one trx on the branch's region**:
    - Insert `orders` with `status = paymentMethod === 'online' ? 'pending_payment' : 'placed'`.
    - Insert `order_items` (one INSERT … VALUES … with multiple rows).
-   - For COD: insert `transactions(type='cod_collection', status='pending', amount=total, src_acc_id=customer, dst_acc_id=restaurantOwner)`.
+   - **No `cod_collection` transaction is written here.** For COD the `transactions(type='cod_collection', status='succeeded')` row is written by the settlement trx on `delivered` (parallels how the `charge` row for online is written by the Kashier webhook on capture, not at order time). One transaction row per terminal money event — no `pending` rows that have to be flipped.
    - Decrement product stock via `core-client.reserveStock(branchId, items)` — **out-of-trx**, after commit. If reserve fails, we void the order (status=`cancelled`, reason=`out_of_stock_post_commit`). This is acceptable: stock was last verified seconds ago.
 7. **Commit**.
 8. For `online`: hand off to payment service to create a Kashier session (separate endpoint `POST /payments/init`, or auto-trigger from the same controller — see §3).
@@ -139,27 +139,40 @@ The simplest UX is to keep `POST /orders` and `POST /payments/init` as **two sep
 
 ---
 
-## 6. GET /restaurant/orders
+## 6. GET /restaurants/:restaurantId/branches/:branchId/orders
 
-- Filters: `branchId`, `status`, `from`, `to`.
-- Cursor pagination (`createdAt` desc).
-- Authorization: `requireRestaurantMember(restaurantId)` + `requireBranchAccess(branchId)`.
-- Hot endpoint → backed by `idx_orders_branch_status_created_at` + `withCache(10)` for the typical "pending in this branch" page.
-- Cache invalidated on every status transition for that branch (the service clears `restaurant:orders:<branchId>:*`).
+- Both ids are **path params** (not query) so existing middleware does the heavy lifting:
+  - `requireRestaurantMember("restaurantId")` — JWT's `restaurantId` must equal the path's, or the actor is `system_admin`.
+  - `requireBranchAccess("branchId")` — non-owners are constrained to `branchIds` from their JWT.
+- Filters (query): `status`, `from`, `to`. Pagination: cursor.
+- Repo query filters by **both** `restaurant_id` and `branch_id` (not just `branch_id`) so a tenant can never read another tenant's row even if they guess a `branchId`. Backed by `idx_orders_branch_status_created_at`; the additional `restaurant_id` predicate is satisfied by the row check, not an index seek.
+- `withCache(10)` keyed `<region>:GET:/restaurants/:rid/branches/:bid/orders?status=...`.
+- Cache invalidated on every status transition for that branch.
 
 ---
 
-## 7. PATCH /orders/{orderId}/status
+## 7. PATCH endpoints by actor
 
-- Single endpoint. The server inspects `currentStatus` and the actor's role to decide if the requested transition is allowed.
-- Each transition uses a small helper `assertTransition(from, to, actorContext)` that throws `InvalidStatusTransition` otherwise.
-- Side effects per transition:
-  - `accepted` → stamp `accepted_at`; WS to customer.
-  - `rejected` → stamp `rejected_at`; trigger refund or void COD; WS to customer.
-  - `preparing` → stamp; WS.
-  - `ready` → stamp; **enqueue auto-assignment** (delivery service).
-  - `assigned` → only system writes this status (assignment service). Manual admin override goes through `POST /deliveries/assign/{orderId}` not this endpoint.
-  - `cancelled` → stamp `cancelled_at`, body must include `reason`. If online & captured → trigger refund. If COD → void the pending `cod_collection` transaction.
+Status transitions are split by actor / route prefix so existing RBAC + branch-membership middleware can guard each path:
+
+| Actor                | Path                                                                              |
+| -------------------- | --------------------------------------------------------------------------------- |
+| customer (cancel)    | `PATCH /customer/orders/:publicId/status`                                         |
+| restaurant member    | `PATCH /restaurants/:restaurantId/branches/:branchId/orders/:publicId/status`     |
+| delivery agent       | `PATCH /agents/orders/:publicId/status`                                           |
+| system admin         | `PATCH /admin/orders/:publicId/status`                                            |
+
+The server still inspects `currentStatus` against `assertTransition(from, to, actorContext)`. Path-prefix middleware gives us "you can't reach this code unless you have the right role/branch"; `assertTransition` gives us "the requested target is legal from the current state for that actor".
+
+Side effects per transition (all stamp the corresponding `<verb>_at` column inside the same trx):
+- `accepted` → WS to customer + branch.
+- `rejected` → trigger refund (online); WS.
+- `preparing` → WS.
+- `ready` → WS; the assignment worker picks it up on its next tick.
+- `assigned` → written by `assignment.service` on a successful claim — **not** reachable from any of the PATCH endpoints.
+- `picked` → written by the agent PATCH; WS.
+- `delivered` → written by the agent PATCH; **runs the settlement trx** (Restaurant-finance.md §7); WS.
+- `cancelled` → stamp `cancelled_at`, body must include `reason`. If online & captured → trigger refund. (COD has nothing to undo.)
 
 ---
 
@@ -186,21 +199,24 @@ The simplest UX is to keep `POST /orders` and `POST /payments/init` as **two sep
 ## 10. Refund handling on cancellation
 
 - If the order was online and a `transaction(type='charge', status='succeeded')` exists → call payment service's `refund(orderId, amount=total)`. This is async (Kashier processes; we get a webhook).
-- If COD with no money collected yet → flip the pending `cod_collection` to `failed` and write `transaction(type='adjustment', amount=0, ...)` for the audit trail (no money moved).
+- If COD: nothing to do for the money side — we only write `cod_collection` on `delivered`, so a cancelled COD order produces no transaction rows. The cancellation alone is the audit trail.
 
 ---
 
 ## 11. RBAC
 
-| Action                                      | Roles allowed                                                     |
-| ------------------------------------------- | ------------------------------------------------------------------ |
-| `POST /orders`                              | `customer`                                                         |
-| `GET /orders/{id}`                          | `customer` (own), `restaurant_user` (member of branch), `system_admin` |
-| `GET /customer/orders`                      | `customer`                                                         |
-| `GET /restaurant/orders`                    | `restaurant_user` (`orders:read`), `system_admin`                  |
-| `PATCH /orders/{id}/status` → accept/reject | `restaurant_user` with `orders:accept`                             |
-| `PATCH /orders/{id}/status` → preparing/ready | `restaurant_user` with `orders:update`                           |
-| `PATCH /orders/{id}/status` → cancelled     | `customer` (own, window), `restaurant_user` (`orders:cancel`), `system_admin` |
+| Action                                                                                | Roles allowed                                                          |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `POST /orders`                                                                        | `customer`                                                             |
+| `GET /orders/{id}`                                                                    | `customer` (own), `restaurant_user` (member of branch), `system_admin` |
+| `GET /customer/orders`                                                                | `customer`                                                             |
+| `GET /restaurants/:rid/branches/:bid/orders`                                          | `restaurant_user` member of `:rid`, branch-allowed for `:bid` (`orders:read`); `system_admin` bypasses |
+| `PATCH /restaurants/:rid/branches/:bid/orders/:id/status` → accept/reject             | `orders:accept`                                                        |
+| `PATCH /restaurants/:rid/branches/:bid/orders/:id/status` → preparing/ready           | `orders:update`                                                        |
+| `PATCH /restaurants/:rid/branches/:bid/orders/:id/status` → cancelled                 | `orders:cancel`                                                        |
+| `PATCH /customer/orders/:id/status` → cancelled                                       | `customer` (own, within cancel window)                                 |
+| `PATCH /agents/orders/:id/status` → picked / delivered                                | `delivery_agent` assigned to that order                                |
+| `PATCH /admin/orders/:id/status` (any target the state machine allows for `admin`)    | `system_admin`                                                         |
 
 Permission seed (added to core's RBAC seed migration):
 

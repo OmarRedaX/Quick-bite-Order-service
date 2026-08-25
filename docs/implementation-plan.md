@@ -130,7 +130,6 @@ Phase 0 creates no tables. Core-event dedupe lives in Redis; all domain tables l
 These belong on `core-service` and must land before this service's Phase 0 is considered complete.
 
 1. **Seed new RBAC permissions** (new migration in `core-service/src/migrations/`):
-
    ```sql
    INSERT INTO permissions (resource, action, created_at) VALUES
      -- Orders
@@ -148,26 +147,26 @@ These belong on `core-service` and must land before this service's Phase 0 is co
      ('finance',    'payout_create', NOW())
    ON CONFLICT (resource, action) DO NOTHING;
    ```
-
    Role mapping (extend the existing seed):
-
    - `owner` → all of the above.
    - `branch_manager` → `orders:read, orders:accept, orders:update, orders:cancel, finance:read`.
    - `staff` → `orders:read, orders:update, orders:accept`.
    - `payments:refund` and `finance:payout_create` are admin-bypassed today; seeded for future extensibility.
-2. **Add `restaurant_branches.delivery_fee INT NOT NULL DEFAULT 0`** (minor units of the branch currency) in core. This service reads it via `GET /api/internal/branches/:id` at checkout.
-3. **Internal API-key auth guard** (for sync HTTP calls **from** this service **to** core):
 
+2. **Add `restaurant_branches.delivery_fee INT NOT NULL DEFAULT 0`** (minor units of the branch currency) in core. This service reads it via `GET /api/internal/branches/:id` at checkout.
+
+3. **Internal API-key auth guard** (for sync HTTP calls **from** this service **to** core):
    - New env on core: `INTERNAL_API_KEY=<secret>` (single shared secret). Matched by `CORE_INTERNAL_API_KEY` on this service's side.
    - New middleware `src/lib/auth/api-key.ts` that compares the `api-key` request header against `env.internal.apiKey` (plain equality — the broker/gateway is the trust boundary).
    - Each domain module mounts its own internal routes inline in its `routes.ts` under the `/internal/...` prefix, guarded by `requireInternalApiKey`. There is **no** dedicated `app/internal/` module.
-4. **Transactional outbox on core** (`src/lib/events/` in core):
 
+4. **Transactional outbox on core** (`src/lib/events/` in core):
    - New env on core: `RABBITMQ_URL`, `RABBITMQ_CORE_EVENTS_EXCHANGE=core.events`, `OUTBOX_DRAIN_CRON="* * * * * *"`, `OUTBOX_BATCH_SIZE=50`.
    - New migration: `events_outbox` table on core's DB (`id, aggregate_type, aggregate_id, event_type, event_id, payload JSONB, created_at, dispatched_at, attempts, last_error`).
    - **Service layer** (never repo) writes the outbox row in the same DB transaction as the domain write. Repos never call `insertOutboxEvent`.
    - The drain lives in a **separate worker process** (`src/worker.ts`), not in the API. `croner` schedules `drainOutbox()`; `drainOutbox` claims a batch with `FOR UPDATE SKIP LOCKED`, publishes with **publisher confirms**, stamps `dispatched_at` on broker ACK. SKIP LOCKED makes N workers safe in parallel.
    - The `core.events` topic exchange is declared by the worker at boot.
+
 5. **Secrets hygiene**: `KASHIER_WEBHOOK_SECRET` (this service), `INTERNAL_API_KEY` (one shared secret between core and order-service today), and RabbitMQ credentials are three different secrets with three different lifecycles. Do not conflate them.
 
 ### Acceptance (Phase 0)
@@ -276,73 +275,85 @@ All of the following go under `/api/internal/*` (guarded by the API-key middlewa
 
 ---
 
-## Phase 3 — Deliveries module
+## Phase 3 — Deliveries & Agents (single phase)
+
+Per the agreed schema (`docs/img_2.png`):
+- **No `deliveries` table**, no `DeliveryEntity`. Delivery state lives on `orders`.
+- **No `agent_presence` table**. Presence is Redis-only (5-minute TTL on `presence:meta:*`).
 
 ### Migrations
 
-- `20260418000060_create_restaurant_balances.ts`.
-- `20260418000070_create_deliveries.ts`.
+- `20260507000060_create_restaurant_balances.ts` — `restaurant_id BIGINT`, `region TEXT`, `currency TEXT`, `balance INT NOT NULL DEFAULT 0`, `updated_at`. PK `(restaurant_id, currency)` so one restaurant can hold balances in multiple currencies if it ever expands cross-region.
+- `20260507000090_create_agent_earnings.ts` — `id BIGSERIAL`, `region`, `agent_id BIGINT`, `order_id BIGINT`, `amount INT`, `currency TEXT`, `earned_at TIMESTAMP DEFAULT NOW()`. Unique `(order_id)` for idempotent settlement. Index `(agent_id, earned_at DESC)`.
 
-### Code
+No `agent_presence` migration — `database-design.md` §8 documents the Redis key schema instead.
 
-1. Entities: `DeliveryEntity`, `RestaurantBalanceEntity`.
-2. Request DTOs: `AssignDeliveryRequestDTO`, `UpdateDeliveryStatusRequestDTO`.
-3. Response DTOs: `DeliveryResponseDTO`, `DeliveryStatusResponseDTO`, `DeliverySummaryResponseDTO`.
-4. Repos: `delivery.repo.ts`, `restaurant-balance.repo.ts` (with `forUpdate` helper).
-5. `assignment.service.ts` — implements Deliveries.md §2 algorithm. Uses a **Postgres-only** candidate scan in this phase (Redis presence layer arrives in Phase 4).
-6. `delivery.service.ts` — `assign`, `reassign`, `updateStatus`. `delivered` runs the **settlement trx** (see Restaurant-finance.md §7 / Deliveries.md §5).
-7. Controller + routes.
-8. **Cross-module hook**: `order.service.updateStatus` for target `ready` enqueues `assignment.service.tryAssign(orderId)` in-process after commit.
+### Code (one phase, all sub-modules ship together)
+
+1. Entities: `RestaurantBalanceEntity`, `AgentEarningEntity`. **No** `DeliveryEntity`, **no** `AgentPresenceEntity`.
+2. Request DTOs: `PresenceOnlineRequestDTO`, `PresencePingRequestDTO` (lat, lng); `AssignAgentRequestDTO` (admin override — `agentId`); the existing `UpdateOrderStatusRequestDTO` is reused for agent `picked`/`delivered`.
+3. Response DTOs: `AgentEarningsResponseDTO`, `DeliveryTaskResponseDTO` (a courier-trimmed view of the order), `RestaurantBalanceResponseDTO`, `PayoutResponseDTO`.
+4. Repos:
+   - `restaurant-balance.repo.ts` — `getForUpdate({restaurantId, currency}, trx)`, `upsertIncrement({restaurantId, region, currency, delta}, trx)`, `decrement({restaurantId, currency, amount}, trx)`.
+   - `agent-earning.repo.ts` — `insertEarning(input, trx)`, `listByAgent(agentId, range, pagination, conn)`, `sumByAgent(agentId, range, conn)`.
+   - Extend `transaction.repo.ts` with `findPayouts({restaurantId, from, to}, pagination, conn)`.
+5. `presence.service.ts` (Redis only — see `database-design.md` §8 for the key schema):
+   - `goOnline / ping(userId, lat, lng, region)` — `HSET presence:meta:<region>:<userId>`, `EXPIRE 300`, `GEOADD presence:geo:<region>`. Defensive `SREM presence:busy`.
+   - `goOffline(userId, region)` — `DEL meta`, `ZREM geo`, `SREM busy`. Reject if the agent currently holds a `picked` order (would orphan in-flight food).
+6. `assignment.service.ts` —
+   - `tryAssign(order)` — see `deliveries.md` §2 for the full algorithm. In short: respect any live `offer:order:<id>` (skip), pick top 5 candidates via `GEOSEARCH` + `EXISTS presence:meta` + `not in presence:busy`, set `offer:order:<id>` `EX 30 NX`, `INCR assign:attempts:<id>`, WS `task.offered` to each candidate.
+   - `claim(order, agentId, trx)` — atomic `SET claim:order:<id> NX`; conditional `UPDATE` of `orders` (status='assigned' WHERE status='ready' AND delivery_agent_id IS NULL); on success: `SADD presence:busy`, WS `task.assigned` + `offer.cancelled` to losers + `order.status_changed` to customer/branch.
+   - `releaseOnOffline(order, agentId, trx)` — used when an `assigned` agent goes offline: reset `orders` row to `ready`, drop `claim`, `SREM busy`. Worker re-broadcasts on next tick.
+7. `agent.service.ts` —
+   - `accept(publicId, userId, region)` — calls `assignment.claim`.
+   - `reject(publicId, userId, region)` — removes `userId` from the `offer:order:*` candidate list, bumps `assign:attempts`. No DB write.
+   - `transition(publicId, userId, region, target)` — wraps the existing `order.service.updateStatus` for `picked`/`delivered`; `delivered` triggers `settlement.service`.
+   - `tasks(userId, region, status, pagination)` — `orders WHERE delivery_agent_id = ? AND (status = ? OR ?)`.
+   - `earnings(userId, region, range, pagination)` — proxy to `agent-earning.repo`.
+8. `settlement.service.ts` — runs on the `delivered` transition (see `deliveries.md` §3). One trx that:
+   - For COD: insert `transactions(cod_collection / succeeded)` (idempotency_key = `cod-collect:<publicId>`).
+   - Compute `commission` (formula deferred to **Phase 4** — until then `commission = 0` and we don't write the commission tx).
+   - `UPDATE orders SET commission, status='delivered', delivered_at`.
+   - Upsert-increment `restaurant_balances` by `subtotal - commission`.
+   - Insert `agent_earnings(order_id UNIQUE, amount = floor(delivery_fee × AGENT_EARNING_SHARE_BPS / 10000))`.
+   - After-commit Redis: `SREM presence:busy`, `DEL claim:order:*`. WS to customer + branch.
+9. `assignment.worker.ts` — registered as `npm run worker`. `croner` schedules a per-region tick every `ASSIGNMENT_TICK_SEC` (default 10s). Each tick: `findReadyUnassigned(region, BATCH=20)` → `assignment.tryAssign(...)` for each row.
+10. Routes — final layout:
+    - `POST /agents/presence/{online,ping,offline}`
+    - `POST /agents/orders/:publicId/{accept,reject}`
+    - `PATCH /agents/orders/:publicId/status`
+    - `GET /agents/tasks?status=`
+    - `GET /agents/earnings?from=&to=`
+    - `POST /admin/orders/:publicId/assign` (admin override; body `{ agentId }`)
+    - The existing `GET /restaurant/orders` and `PATCH /orders/:publicId/status` are **refactored** into `/restaurants/:restaurantId/branches/:branchId/orders[ /:publicId/status ]` so `requireRestaurantMember` + `requireBranchAccess` middleware can guard them. Customer cancel goes to a separate `PATCH /customer/orders/:publicId/status`.
+11. The repo `findOrdersByBranch` is renamed `findOrdersByRestaurantBranch` and adds the `restaurant_id` predicate (defense-in-depth — a forged JWT-with-wrong-restaurantId can no longer leak rows even if it sneaks past the middleware).
+
+### Commission deferred to Phase 4
+
+`orders.commission` is `0` and no `transactions(type=commission)` row is written in Phase 3. Phase 4 turns both on with the formula `commission = floor(subtotal × branch.commissionBps / 10000)` and adds a one-shot backfill helper for any orders delivered during Phase 3.
 
 ### Core-service changes required
 
-- `GET /api/internal/users/:id?role=delivery_agent` (or a dedicated `GET /api/internal/agents/:id`) — returns `{ id, name, phone }` for display on the customer app when a delivery is assigned. Same API-key guard.
+- `GET /api/internal/agents/:id` — returns `{ id, name, phone }` for the customer app to show "Driver: Ahmed (+20…)" once `assigned`.
+- `delivery_agent` must already exist as a `system_role` (already seeded by core).
 
 ### Acceptance
 
-- Order moved to `ready` triggers a delivery assignment (manual path with `agentId` works; auto path uses Postgres GIST until Phase 4).
-- Agent flow `accept → picked → delivered` works.
-- On `delivered`: `restaurant_balances.balance` increases by `subtotal - commission`; `transactions(commission)` row exists; `agent_earnings` row will be inserted in Phase 4 (stubbed here).
-- COD: pending `cod_collection` flips to `succeeded`.
-- Reassignment increments the chain; `MAX_REASSIGNMENT_ATTEMPTS` enforced.
+- Agent goes online → `EXISTS presence:meta:<region>:<agentId>` returns 1, TTL ≈ 300s.
+- Restaurant marks an order `ready` → next worker tick (≤ 10s) broadcasts `task.offered` to the 5 closest online + non-busy agents. Each agent receives the WS message; `offer:order:<id>` exists with TTL 30s.
+- Two agents accept simultaneously → exactly one wins via SETNX claim; the loser gets 409 + `offer.cancelled`.
+- The winner's `orders` row has `delivery_agent_id`, `status=assigned`, `assigned_at`. `presence:busy:<region>` contains the agent.
+- Agent moves `assigned → picked → delivered`. On `delivered`:
+  - `restaurant_balances` increments by `subtotal - commission` (commission = 0 in Phase 3).
+  - `agent_earnings` has one row, `amount = floor(delivery_fee × 0.8)` for the default config.
+  - For COD: a `cod_collection / succeeded` transaction exists with `idempotency_key = cod-collect:<publicId>`.
+  - `presence:busy` no longer contains the agent.
+- Admin override `POST /admin/orders/:publicId/assign` works regardless of distance/busy state.
+- After `MAX_REASSIGNMENT_ATTEMPTS` failed broadcasts → admin alert WS, order stays `ready`.
 
 ---
 
-## Phase 4 — Agents module
-
-### Migrations
-
-- `20260418000080_create_agent_presence.ts` (PostGIS extension + table + partial GIST index).
-- `20260418000090_create_agent_earnings.ts`.
-
-### Code
-
-1. Entities: `AgentPresenceEntity`, `AgentEarningEntity`.
-2. Request DTOs: `PresenceOnlineRequestDTO` (lat, lng); reuse for ping.
-3. Response DTOs: `AgentEarningsResponseDTO`, `DeliveryTaskResponseDTO`.
-4. Repos: `agent-presence.repo.ts` (UPSERT), `agent-earning.repo.ts`.
-5. `presence.service.ts` — UPSERT Postgres; **also** maintain Redis (`presence:geo:<region>`, `presence:meta:<region>:<agentId>`, `presence:busy`).
-6. `earning.service.ts` — list + sum.
-7. `agent.service.ts` — task list (via `delivery.repo`).
-8. Controllers + routes.
-9. **Plug Redis presence into `assignment.service`**: switch the candidate scan to Redis with Postgres fallback. Add `agent_earnings` insert into the `delivered` settlement trx from Phase 3.
-10. Stale-presence cleanup inside the request path only (no background worker yet — Phase 7 covers workers).
-
-### Core-service changes required
-
-- Confirm `delivery_agent` as a `system_role` (already exists per `core-service`'s seed).
-- Nothing new — all agent identity lookups use the `GET /api/internal/agents/:id` added in Phase 3.
-
-### Acceptance
-
-- Presence ping updates both Postgres and Redis.
-- Going offline rejects if the agent is in an active delivery.
-- `GET /agents/tasks` and `/agents/earnings` work; cursor pagination respected.
-- Auto-assignment reads from Redis in the hot path; Postgres fallback works when Redis is cold.
-
----
-
-## Phase 5 — Restaurant Finance module
+## Phase 4 — Restaurant Finance module
 
 No new migrations.
 
@@ -350,10 +361,21 @@ No new migrations.
 
 1. Entities reuse `RestaurantBalanceEntity` and `TransactionEntity`.
 2. DTOs: `RestaurantBalanceResponseDTO`, `PayoutResponseDTO`, `CreatePayoutRequestDTO`.
-3. Repos: extend `transaction.repo.ts` with `findPayouts(restaurantId, from, to, paginationParams)`.
-4. `finance.service.ts` — `getBalance`, `listPayouts`, `recordPayout` (admin).
-5. Controller + routes for `/restaurant/balance`, `/restaurant/payouts`.
-6. Idempotency strict on `POST /restaurant/payouts`.
+3. Repos: extend `transaction.repo.ts` with `findPayouts({restaurantId, ownerId, from, to}, pagination, conn)` (filters `transaction_type='payout' AND dst_acc_id=ownerId`).
+4. `finance.service.ts`:
+   - `getBalance(restaurantId, region)` — SELECT all rows in `restaurant_balances` for the restaurant, return per-currency.
+   - `listPayouts(restaurantId, range, region, pagination)` — calls the repo, maps to DTO.
+   - `recordPayout(adminInput, region)` — admin-only; idempotent. See `restaurant-finance.md` §4.
+5. **Commission write — added to `settlement.service`** (the deferred bit from Phase 3):
+   - On `delivered`, fetch `branch.commissionBps` via the cached `core:branch:<id>`.
+   - `commission = floor(subtotal × commissionBps / 10000)`. `UPDATE orders SET commission`.
+   - Insert `transactions(type='commission', method='system', status='succeeded', amount=commission, src_acc_id=restaurantOwnerId, dst_acc_id=NULL, idempotency_key='commission:' || publicId)` (unique on `idempotency_key` makes this safe).
+   - The `restaurant_balances` increment in the same trx now uses `subtotal - commission` (was `subtotal - 0`).
+   - One-shot backfill script `play/backfill-phase3-commissions.ts` for any orders that hit `delivered` during Phase 3.
+6. Controllers + routes:
+   - `GET /restaurants/:restaurantId/balance` — `requireRestaurantMember(:restaurantId)` + `rbac(finance:read)`.
+   - `GET /restaurants/:restaurantId/payouts` — same guards.
+   - `POST /admin/restaurants/:restaurantId/payouts` — admin only; `idempotency({strict:true})`.
 
 ### Core-service changes required
 
@@ -364,40 +386,11 @@ No new migrations.
 - Owner and manager can read balance + payouts; staff cannot.
 - Admin can record a payout; balance decrements; same idempotency key returns the same payout.
 - Payout > balance → 409 `InsufficientBalance`.
+- A new `delivered` order produces an `orders.commission > 0` and a matching commission `transactions` row.
 
 ---
 
-## Phase 6 — WebSocket event wiring
-
-The WS server, hub, auth, and publisher already exist from Phase 0. This phase wires **events** from existing services into that publisher.
-
-1. **In `order.service`**:
-   - `placeOrder` → `branch:<id>:order.created` (COD) after commit; for online this is deferred until `payment.captured` in the webhook service.
-   - `updateStatus` → `customer:<id>` and `branch:<id>` `order.status_changed`.
-2. **In `payment.service` / `kashier-webhook.service`**:
-   - On `captured`: `customer:<id>:order.status_changed` (to `placed`) and `branch:<id>:order.created`.
-   - On `failed`: `customer:<id>:payment.failed`.
-3. **In `delivery.service`**:
-   - `assign` → `agent:<id>:task.assigned`.
-   - `updateStatus` → `customer:<id>` and `branch:<id>` `delivery.status_changed`.
-4. **In `presence.service`**:
-   - During `ping`, if the agent has an active delivery, publish `customer:<id>:delivery.position`.
-5. **Channel-permission guards**:
-   - Harden `ws-auth.ts` permitted-channel computation against new channels (admin alert channel).
-
-### Core-service changes required
-
-- None — WS is end-user facing, not inter-service.
-
-### Acceptance
-
-- A customer client connects, subscribes to `customer:<id>`, places a COD order, and receives `order.created` without polling.
-- A branch client receives `order.created` events for its branch only.
-- An unauthorized channel subscription closes the socket with the documented code.
-
----
-
-## Phase 7 — Cold archival worker (the only background worker)
+## Phase 5 — Cold archival worker (the only background worker)
 
 ### Goal
 
@@ -410,7 +403,7 @@ Every night, move rows whose `created_at` is in a **prior year** from the hot cl
 ### Code
 
 1. `lib/jobs/archival.worker.ts` — one instance per region, scheduled nightly (simple `setInterval` + guard on a Redis lock `archival:<region>:lock` to avoid duplicate runs if multiple processes start):
-   - Walk tables in FK-safe order: `agent_earnings → deliveries → payment_webhook_events → payment_sessions → transactions → order_items → orders`.
+   - Walk tables in FK-safe order: `agent_earnings → payment_webhook_events → payment_sessions → transactions → order_items → orders`. (No `deliveries` table per the agreed schema; delivery state lives on `orders` and travels with the order row.)
    - For each table, loop in batches of 1000 rows where `created_at < date_trunc('year', NOW())`:
      - Begin trx on hot + trx on archive.
      - `SELECT ... FROM hot WHERE id IN (...)` / `INSERT ... INTO archive` / `DELETE FROM hot WHERE id IN (...)`.
@@ -440,14 +433,17 @@ Every night, move rows whose `created_at` is in a **prior year** from the hot cl
 ## Build cadence summary
 
 ```
-Phase 0  Scaffolding (WS base, core-client base, inbound core webhook route)
-Phase 1  Orders                      ───►  COD orders end-to-end
-Phase 2  Payments + Kashier          ───►  online orders end-to-end
-Phase 3  Deliveries + settlement     ───►  full money flow on delivered
-Phase 4  Agents + presence           ───►  auto-assignment on Redis
-Phase 5  Restaurant finance          ───►  owner/admin financial views
-Phase 6  WebSocket event wiring      ───►  real-time everywhere
-Phase 7  Cold archival worker        ───►  hot DB stays small
+Phase 0  Scaffolding                            ───►  empty Express app + WS + AMQP + sharding boot
+Phase 1  Orders                                 ───►  COD orders end-to-end (WS emitted inline)
+Phase 2  Payments + Kashier                     ───►  online orders end-to-end (WS emitted inline)
+Phase 3  Deliveries & Agents (single phase)     ───►  presence, auto-assign on Redis GEO,
+                                                       agent earnings, settlement on delivered
+                                                       (delivery state lives on `orders`, no
+                                                        `deliveries` table per img_2.png)
+Phase 4  Restaurant finance                     ───►  balances, payouts, commission write-on-delivered
+Phase 5  Cold archival worker                   ───►  hot DB stays small
 ```
+
+WebSocket emission is **not** a separate phase — every status-change event is published in the same phase that owns the transition (Phase 1 for order lifecycle, Phase 2 for payment-driven ones, Phase 3 for delivery-driven ones).
 
 Each phase is shippable. No phase mixes modules. No phase is started until the previous phase's acceptance is checked AND the matching **"Core-service changes required"** for that phase (listed inline above) are in place.

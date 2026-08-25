@@ -10,13 +10,13 @@ The **writes** that change the balance live in the Deliveries module (settlement
 
 ## 1. Endpoints
 
-| Endpoint                                              | Auth                                  |
-| ----------------------------------------------------- | ------------------------------------- |
-| `GET /restaurant/balance`                             | restaurant owner / manager (`finance:read`) |
-| `GET /restaurant/payouts?from=&to=`                   | restaurant owner / manager (`finance:read`) |
-| `POST /restaurant/payouts` *(admin-side write)*       | `system_admin`                        |
+| Endpoint                                                                  | Auth                                                                  |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `GET /restaurants/:restaurantId/balance`                                  | `requireRestaurantMember(:restaurantId)` + `rbac(finance:read)`        |
+| `GET /restaurants/:restaurantId/payouts?from=&to=`                        | `requireRestaurantMember(:restaurantId)` + `rbac(finance:read)`        |
+| `POST /admin/restaurants/:restaurantId/payouts`                           | `system_admin`                                                         |
 
-`POST /restaurant/payouts` is the admin endpoint that records an externally-completed bank transfer. It's the only write in this module; it lives here because the data primarily affects restaurant balance views.
+The path-level `requireRestaurantMember` middleware means a restaurant_user can never read another tenant's balance even if the JWT is forged on the role bit — the JWT `restaurantId` claim must match the path. `system_admin` bypasses both middlewares.
 
 ---
 
@@ -46,7 +46,7 @@ The **writes** that change the balance live in the Deliveries module (settlement
 
 ---
 
-## 4. POST /restaurant/payouts (admin)
+## 4. POST /admin/restaurants/:restaurantId/payouts (admin)
 
 ### Request DTO
 
@@ -64,12 +64,12 @@ Header: `Idempotency-Key` (strict).
 
 ### Algorithm
 
-1. Validate `restaurantId` exists via `core-client`.
+1. Validate `restaurantId` exists via `core-client.getRestaurant` → also gives us `ownerId`.
 2. In a trx (region of restaurant):
-   - SELECT `restaurant_balances` FOR UPDATE.
+   - SELECT `restaurant_balances` for `(restaurantId, currency)` `FOR UPDATE`. If no row exists → 409 `InsufficientBalance`.
    - If `balance < amount` → 409 `InsufficientBalance`.
-   - Insert `transactions(type='payout', method='bank_transfer', status='succeeded', amount, currency, src_acc_id=NULL, dst_acc_id=ownerId, provider_reference_id, idempotency_key=<header>)`.
-   - Update `restaurant_balances.balance -= amount`.
+   - Insert `transactions(type='payout', method='bank_transfer', status='succeeded', amount, currency, src_acc_id=NULL, dst_acc_id=ownerId, provider_reference_id, idempotency_key=<header>)`. `src_acc_id=NULL` because the source is the platform itself (no platform user in core); the `transaction_type='payout'` is enough to identify it.
+   - `UPDATE restaurant_balances SET balance = balance - ?, updated_at=now() WHERE restaurant_id=? AND currency=?`.
    - Commit.
 3. Return `PayoutResponseDTO`.
 

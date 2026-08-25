@@ -1,169 +1,131 @@
-# Business Logic — Deliveries Module
+# Business Logic — Deliveries (assignment & lifecycle)
 
-Owner module: `app/delivery/`
+There is **no `deliveries` table** and no separate `app/delivery/` module. Delivery state lives on the `orders` row and the user-facing actions live in:
+- `app/agent/` — presence + accept/reject/picked/delivered (see `agents.md`).
+- `app/order/` — restaurant + customer status transitions (see `orders.md`).
+- `app/assignment/` — the broadcast-to-N-candidates assignment service + its background worker (this file).
 
-Responsible for converting a `ready` order into a delivery (assignment), tracking the delivery lifecycle, and supporting reassignment.
+This file covers ONLY the assignment algorithm (broadcast offer + claim) and the in-flight order's life on the `orders` row.
 
 ---
 
-## 1. Delivery status machine
+## 1. Order status that this module owns
 
+| Status      | Set by                          | Triggered by                                  |
+| ----------- | ------------------------------- | --------------------------------------------- |
+| `assigned`  | `assignment.service` (claim)    | first agent to call `POST /agents/orders/:id/accept` |
+| `picked`    | `agent.service`                 | `PATCH /agents/orders/:id/status` with `picked` |
+| `delivered` | `agent.service` (settlement)    | `PATCH /agents/orders/:id/status` with `delivered` |
+| `cancelled` (from `assigned`) | admin only       | `PATCH /restaurants/:rid/branches/:bid/orders/:id/status` |
+
+`picked → cancelled` is forbidden for everyone (food is in transit; resolve via a future "issue" flow).
+
+---
+
+## 2. Assignment — broadcast to top N candidates
+
+### Trigger
+
+A background worker (`src/worker.ts`, registered as `npm run worker`) ticks every `ASSIGNMENT_TICK_SEC` (env, default 10s). Per region:
+
+```sql
+SELECT id, public_id, branch_id, restaurant_id, total, currency,
+       delivery_lat, delivery_lng, delivery_address_text_snapshot
+FROM orders
+WHERE status = 'ready'
+  AND delivery_agent_id IS NULL
+ORDER BY created_at ASC
+LIMIT BATCH;
 ```
-assigned ─► accepted ─► picked ─► delivered (terminal)
-   │           │           │
-   │           ▼           ▼
-   │        rejected    cancelled
-   │           │
-   ▼           ▼
-reassigned (creates new row)
-```
 
-| Status        | Meaning                                                  | Who writes |
-| ------------- | -------------------------------------------------------- | ---------- |
-| `assigned`    | Delivery row created; agent notified                     | system / system_admin (manual) |
-| `accepted`    | Agent accepted the task                                  | agent      |
-| `rejected`    | Agent declined the task → triggers reassignment          | agent      |
-| `picked`      | Agent confirmed pickup at branch                         | agent      |
-| `delivered`   | Agent confirmed handoff at customer location             | agent → terminal; triggers money settlement |
-| `cancelled`   | Order was cancelled while in delivery → release agent    | system     |
-| `reassigned`  | Agent rejected or timed out; superseded by new row       | system     |
+For each row: `assignment.service.tryAssign(order)`. Backed by `idx_orders_status_created_at` (partial WHERE `status IN ('ready','assigned')`).
 
-`orders.delivery_agent_id` mirrors the **current** delivery's agent (denormalized for the agent task list).
+### Algorithm
 
----
+1. **Skip if there's a live offer**: `EXISTS offer:order:<orderId>` → already broadcast within the last 30s, leave it for the agents to act on.
+2. **Skip if attempts exhausted**: `assign:attempts:<orderId> >= MAX_REASSIGNMENT_ATTEMPTS` → emit `admin:alerts:assignment.exhausted` WS, leave the order in `ready`. Operator unsticks via `POST /admin/orders/:publicId/assign`.
+3. **Find candidates**:
+   ```
+   GEOSEARCH presence:geo:<region> FROMLONLAT <branch.lng> <branch.lat>
+             BYRADIUS <ASSIGNMENT_RADIUS_METERS> m ASC COUNT (5*OVERSCAN)
+   ```
+   For each returned `agentId`:
+   - Drop if `EXISTS presence:meta:<region>:<agentId>` returns 0 (TTL expired but geo entry stale).
+   - Drop if `SISMEMBER presence:busy:<region> <agentId>` returns 1 (currently holds an order).
+   - Take the first 5 survivors by distance.
+4. **No candidates** → bump `assign:attempts:<orderId>`, emit metric, return.
+5. **Broadcast** the offer:
+   - `SET offer:order:<orderId> "<id1>,<id2>,..." EX 30 NX` (the NX ensures we don't overwrite a live offer).
+   - WS `agent:<id>:task.offered` to each candidate with the offer payload (orderId, branch coords + name + address, dropoff coords + address, total, currency, expiresAt = now + 30s).
+   - `INCR assign:attempts:<orderId>` with TTL 1h.
 
-## 2. POST /deliveries/assign/{orderId}
+### Claim — see `agents.md` §3 (`POST /agents/orders/:publicId/accept`)
 
-Two callers:
-1. **System** (auto): triggered when `orders.status` becomes `ready`.
-2. **Admin** (manual): admin can force-assign or override.
+The first acceptor wins via `SET claim:order:<orderId> <agentId> NX EX 300`. Losers are notified `offer.cancelled` reason `claimed_by_other`.
 
-### Algorithm (auto)
+### Reassignment
 
-1. Resolve region from order.
-2. Validate order is `ready` and has no active delivery (no row with `status IN ('assigned','accepted','picked')`).
-3. **Find candidate agents** — `lib/sharding`-aware:
-   - Read from Redis geo set `presence:geo:<region>` (built by presence pings).
-   - `GEOSEARCH` within `ASSIGNMENT_RADIUS_METERS` (env, default 5000m) of the branch coords.
-   - Filter to agents with no active delivery (a Redis set `presence:busy:<region>` is maintained on assignment/release).
-   - Sort by distance, take top `K` (env, default 5).
-4. For each candidate (in order):
-   - In a trx:
-     - SELECT agent_presence FOR UPDATE; verify `is_online=TRUE`, `last_seen_at > NOW() - 90s`.
-     - Insert `deliveries` row (`status='assigned'`).
-     - Update `orders.status='assigned'`, `delivery_agent_id`, `assigned_at`.
-     - Mark agent busy in Redis.
-     - Commit.
-   - Push WS to `agent:<id>` with the task. Wait for `accepted` or timeout.
-   - **Acceptance window**: agent has `AGENT_ACCEPT_TIMEOUT_SEC` (env, default 30s) to accept. If no accept → mark this delivery `rejected`, mark agent free in Redis (lightly penalize), retry next candidate.
-5. If all candidates fail → fall through to **broadcast mode**: WS push to all online agents in radius; first to claim wins (claim is `PATCH /deliveries/{id}/status accept`, atomic).
-6. If broadcast also fails after `MAX_REASSIGNMENT_ATTEMPTS` (env, default 3) → publish `assignment.unassigned_alert` WS to admin channel; order stays `ready`.
+- Triggered automatically by the next worker tick once `offer:order:*` has expired (no acceptance) AND `claim:order:*` does not exist.
+- Triggered immediately by an agent calling `POST /agents/presence/offline` while holding an order in `assigned` (not `picked`):
+  - The order is reset: `UPDATE orders SET delivery_agent_id=NULL, status='ready', assigned_at=NULL WHERE public_id=? AND status='assigned'`.
+  - `SREM presence:busy:<region> <agentId>`, `DEL claim:order:<orderId>`.
+  - Worker picks it up on the next tick.
+- `MAX_REASSIGNMENT_ATTEMPTS` (env, default 3) caps the total broadcast rounds. After the cap, admin alert.
 
-### Algorithm (manual)
+### Admin override
 
-- Admin specifies `agentId` in body.
-- Skip candidate scoring; insert `deliveries` directly.
-- All other side effects identical.
-
-### Idempotency
-
-- The `deliveries` table is the natural idempotency: an order with an active delivery cannot be re-assigned. Returns 409 if requested.
+`POST /admin/orders/:publicId/assign` (body `{ agentId }`) skips the broadcast entirely:
+- Verifies the agent exists in core via `core-client.getAgent`.
+- Force-claims regardless of distance/busy state (admin assumes the responsibility).
+- Same DB writes + WS as the normal claim.
 
 ---
 
-## 3. POST /deliveries/reassign/{orderId}
+## 3. Settlement on `delivered`
 
-- Marks the active `deliveries` row `status='reassigned'`, `reassigned_at`.
-- Calls the assignment algorithm again. New `deliveries` row references `reassigned_from = old_id`.
-- Limits: `MAX_REASSIGNMENT_ATTEMPTS` total per order (counted via the chain). Beyond that → 409 + admin alert.
+Triggered by `PATCH /agents/orders/:publicId/status` with `delivered`. Same trx, in this order:
 
----
+1. `SELECT restaurant_balances WHERE restaurant_id=? AND currency=? FOR UPDATE` (or insert a zero row first, then re-select).
+2. Compute `commission = floor(subtotal × branch.commissionBps / 10000)`. `UPDATE orders SET status='delivered', delivered_at=now(), commission=?`.
+3. **Charge transaction**:
+   - For online: a `charge / succeeded` row was already written by the Kashier webhook — no-op here.
+   - For COD: insert `transactions(type='cod_collection', method='cash', status='succeeded', amount=order.total, src_acc_id=order.customer_id, dst_acc_id=order.restaurant_owner_id, idempotency_key='cod-collect:' || order.public_id)` — unique on `idempotency_key` makes this safe.
+4. **Commission transaction**: insert `transactions(type='commission', method='system', status='succeeded', amount=commission, src_acc_id=order.restaurant_owner_id, dst_acc_id=NULL, idempotency_key='commission:' || order.public_id)`.
+5. **Restaurant balance**: `INSERT INTO restaurant_balances (restaurant_id, region, currency, balance) VALUES (?, ?, ?, ?) ON CONFLICT (restaurant_id, currency) DO UPDATE SET balance = restaurant_balances.balance + EXCLUDED.balance, updated_at=now()` for `subtotal - commission`.
+6. **Agent earning**: insert `agent_earnings(agent_id, order_id, amount, currency)` with `amount = floor(order.delivery_fee × AGENT_EARNING_SHARE_BPS / 10000)`. Unique on `order_id` → idempotent.
+7. Commit.
+8. After-commit: `SREM presence:busy:<region> <agentId>`, `DEL claim:order:<orderId>`. WS to customer + branch.
 
-## 4. PATCH /deliveries/{deliveryId}/status
-
-Single endpoint for agent actions. Body: `{ status }`. Allowed transitions per actor:
-
-| Current  | Target     | Actor   |
-| -------- | ---------- | ------- |
-| assigned | accepted   | agent   |
-| assigned | rejected   | agent   |
-| accepted | picked     | agent   |
-| picked   | delivered  | agent   |
-
-Anything else → 409.
-
-### Side effects
-
-- `accepted` → stamp `accepted_at`; WS to customer + branch.
-- `rejected` → stamp `rejected_at`; trigger reassignment.
-- `picked` → stamp `picked_at`; mirror to `orders.status='picked'`, `picked_at`; WS to customer + branch.
-- `delivered` → stamp `delivered_at`; **money settlement trx** (see §5); mirror to `orders.status='delivered'`, `delivered_at`; WS to all parties.
+Failure rolls back the whole thing — no partial settlement.
 
 ---
 
-## 5. Settlement on `delivered`
+## 4. Cancellation while in delivery
 
-In the same DB trx as the status flip:
-
-1. SELECT `restaurant_balances` FOR UPDATE for `(restaurant_id, currency)`.
-2. Compute `commission = floor(subtotal × branch.commissionRate)`. Update `orders.commission`.
-3. For online: ensure the `transactions(type='charge', status='succeeded')` exists (must, by design).
-4. For COD: flip `transactions(type='cod_collection')` from `pending` → `succeeded`.
-5. Insert `transactions(type='commission', method='system', status='succeeded', amount=commission, src=ownerId, dst=NULL)`.
-6. Update `restaurant_balances.balance += subtotal - commission`.
-7. Compute `agentEarning = base_fee + per_km × distance_km` (env-configurable rate; today simply `branch.delivery_fee × agentShareRate`).
-8. Insert `agent_earnings(agent_id, order_id, delivery_id, amount, currency)` (unique on `delivery_id` makes it idempotent).
-9. (No outbound events; clients are notified via WebSocket.)
-
-All in one trx. Failure rolls back the whole thing — no partial settlement.
+- `assigned → cancelled` (admin only): clear `delivery_agent_id`, stamp `cancelled_at`, `SREM presence:busy`, `DEL claim:order:*`. WS `task.cancelled` to the agent.
+- `picked → cancelled`: forbidden. Out-of-scope for this milestone.
 
 ---
 
-## 6. Cancellation while in delivery
+## 5. Invariants
 
-- If order is cancelled while delivery is `assigned` or `accepted`:
-  - Mark delivery `cancelled`.
-  - Release agent in Redis.
-  - WS to agent (`task.cancelled`).
-- If cancelled after `picked`: this is a complex policy decision (food already with agent). For now, **forbidden** by the order-status validator (must be `delivered` or returned via a separate "issue" flow not in scope).
-
----
-
-## 7. RBAC
-
-| Action                                          | Role                                              |
-| ----------------------------------------------- | ------------------------------------------------- |
-| `POST /deliveries/assign/{orderId}` (manual)    | `system_admin`                                    |
-| `POST /deliveries/reassign/{orderId}`           | `system_admin`                                    |
-| `PATCH /deliveries/{id}/status` (accept/pickup/deliver) | the assigned `delivery_agent`             |
-
-Permission `deliveries:assign` (admin-only). Agents are not RBAC-permissioned for their own task — ownership check in service.
+1. An order in `assigned` always has `delivery_agent_id NOT NULL`.
+2. An order in `delivered` always has `agent_earnings(order_id)`, `restaurant_balances` updated, and (for COD) one `cod_collection / succeeded` transaction.
+3. `presence:busy:<region>` membership ⇔ the agent has an `orders` row in `(assigned, picked)`.
+4. `MAX_REASSIGNMENT_ATTEMPTS` cap — beyond that the order stays `ready` until admin override.
+5. The settlement trx is the only writer to `restaurant_balances.balance`'s positive side (payouts are the negative side).
 
 ---
 
-## 8. Invariants
+## 6. WebSocket events emitted
 
-1. An order has at most one active delivery (`status IN ('assigned','accepted','picked')`).
-2. `deliveries.status='delivered'` implies `agent_earnings(delivery_id)` exists.
-3. `deliveries.status='delivered'` implies `restaurant_balances.balance` was incremented atomically.
-4. Reassignment chain length ≤ `MAX_REASSIGNMENT_ATTEMPTS`.
-5. `delivery.agent_id` matches the actor on every PATCH (no agent can act on another agent's delivery).
+(Full table is in `agents.md` §9; restating here for the reader who arrived via this doc.)
 
----
-
-## 9. Performance notes
-
-- Assignment radius scan must come from **Redis** in steady state. Postgres GIST is the fallback if Redis is empty/cold.
-- The Redis geo set is updated on every presence ping (write-through). Online/offline transitions add/remove the agent.
-- `idx_deliveries_agent_id_status_assigned_at` covers the agent task list query.
-- The denormalized `orders.delivery_agent_id` covers the simpler "what's my current task" customer-side lookup.
-
----
-
-## 10. WebSocket events emitted
-
-| Event             | Channel              | Payload (response DTO)                              |
-| ----------------- | -------------------- | --------------------------------------------------- |
-| `task.assigned`   | `agent:<id>`         | `DeliveryTaskResponseDTO`                           |
-| `task.cancelled`  | `agent:<id>`         | `{ deliveryId, reason }`                            |
-| `delivery.status_changed` | `customer:<id>`, `branch:<id>` | `{ orderId, status, ts, agent: { id, name, phone? } }` |
+| Event                  | Channel                        | Payload                                              |
+| ---------------------- | ------------------------------ | ---------------------------------------------------- |
+| `task.offered`         | `agent:<id>` × N candidates    | offer payload                                        |
+| `offer.cancelled`      | `agent:<id>` × losers / on offline | `{ orderId, reason }`                            |
+| `task.assigned`        | `agent:<id>` (winner)          | `DeliveryTaskResponseDTO`                            |
+| `task.cancelled`       | `agent:<id>`                   | `{ orderId, reason }`                                |
+| `order.status_changed` | `customer:<id>`, `branch:<id>` | `OrderStatusResponseDTO`                             |
+| `assignment.exhausted` | `admin:alerts`                 | `{ orderId, attempts }`                              |
