@@ -5,16 +5,20 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/server.ts",
+    "worker": "tsx watch src/worker.ts",
     "start": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
     "typecheck": "tsc --noEmit",
     "migrate": "knex --knexfile src/lib/knex/knexfile.ts migrate:latest",
     "migrate:rollback": "knex --knexfile src/lib/knex/knexfile.ts migrate:rollback",
     "migrate:status": "knex --knexfile src/lib/knex/knexfile.ts migrate:status",
     "migrate:make": "knex --knexfile src/lib/knex/knexfile.ts migrate:make",
-    "migrate:all": "tsx scripts/migrate-all.ts"
+    "migrate:all": "tsx scripts/migrate-all.ts",
+    "partitions:create": "tsx scripts/create-partitions.ts"
   },
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",
+    "@types/node-cron": "^3.0.11",
     "amqp-connection-manager": "^5.0.0",
     "amqplib": "^0.10.5",
     "bcrypt": "^6.0.0",
@@ -28,6 +32,7 @@
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
     "knex": "^3.1.0",
+    "node-cron": "^4.2.1",
     "pg": "^8.18.0",
     "reflect-metadata": "^0.2.2",
     "socket.io": "^4.8.3",
