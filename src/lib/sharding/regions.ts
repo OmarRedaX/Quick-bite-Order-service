@@ -1,4 +1,5 @@
  import {env} from "../config/env";
+import {unknownRegionError} from "./errors";
 
 // Region codes are normalized to lowercase. Country codes from core may
 // arrive uppercase ("EG") or from clients in either case; the router
@@ -18,7 +19,7 @@ export function isRegion(candidate: string | undefined | null): candidate is str
 export function assertRegion(candidate: string | undefined | null): string {
     const norm = normalizeRegion(candidate);
     if (!norm || !set.has(norm)) {
-        throw new Error(`Unknown region: "${candidate}". Known: ${env.regions.join(",")}`);
+        throw unknownRegionError(candidate, env.regions);
     }
     return norm;
 }

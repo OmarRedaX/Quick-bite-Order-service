@@ -11,6 +11,18 @@ function flattenMessages(errors: ValidationError[]): string[] {
     return out;
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Syntax-only check matching what Postgres's `uuid` column type accepts.
+ * Deliberately not the stricter RFC4122 version/variant check (`uuid.validate`)
+ * — a route param that fails this would otherwise reach the DB as a raw
+ * "invalid input syntax for type uuid" error and surface as an unhandled 500.
+ */
+export function isUuidLike(value: string): boolean {
+    return UUID_PATTERN.test(value);
+}
+
 export async function validateBody<T extends object>(
     cls: new () => T,
     body: unknown,
