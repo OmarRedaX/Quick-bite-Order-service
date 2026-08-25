@@ -5,8 +5,7 @@ dist/
 .DS_Store
 .idea/
 .vscode/
-CLAUDE.md
-.claude/settings.local.json
+.zip
 
 # local experimentation scripts — not tracked
 play/
