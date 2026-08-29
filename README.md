@@ -1,219 +1,696 @@
 # order-service
 
-The **Orders & Payments** microservice of the QuickBite platform (a food-delivery marketplace — think customers ordering from restaurants, a restaurant dashboard managing orders, delivery agents fulfilling them, and admins overseeing all of it). This service owns the transactional truth of the system: order placement and lifecycle, online (Kashier) and cash-on-delivery payments, delivery assignment and agent earnings, restaurant balance/payouts, real-time WebSocket updates, and nightly cold-archival of prior-year data.
+The **Orders & Payments** microservice of the QuickBite platform — a food-delivery marketplace. This service owns order placement and lifecycle, online (Kashier) and cash-on-delivery payments, delivery agent assignment and earnings, restaurant balance and payouts, real-time order/delivery updates over WebSocket, and nightly archival of prior-year data to a separate cold-storage database. It does **not** own users, restaurants, branches, products, customer addresses, or the RBAC permission catalog — those belong to a separate `core-service` and are consumed over sync HTTP or a cached read-through projection.
 
-It does **not** own users, restaurants, branches, products, customer addresses, or the RBAC permission catalog — those live in a separate `core-service` and are consumed over sync HTTP or cached read-through projections. Four client apps talk to the platform: a customer app, a restaurant dashboard, a delivery agent app, and an admin dashboard — all of them hit `core-service` for catalog/auth data and this service for everything that happens after "place order."
-
-This file is meant to let a newcomer understand the whole project — the domain, how a request actually flows through the system end to end, every module, every endpoint, the data model, and how to run it locally. For the line-by-line coding conventions this codebase follows, see [`CLAUDE.md`](./CLAUDE.md); for the original design rationale docs, see [`docs/`](./docs/README.md).
+Everything in this document was verified against the actual code in this repository (not the design docs in `docs/`, which describe the original plan and drift from the shipped implementation in a couple of places — noted inline where relevant).
 
 ## Contents
 
-- [Domain model — the order lifecycle](#domain-model--the-order-lifecycle)
-- [How an order actually flows through the system](#how-an-order-actually-flows-through-the-system)
-- [Modules, in depth](#modules-in-depth)
-- [API reference](#api-reference)
-- [WebSocket events](#websocket-events)
-- [Architecture](#architecture)
-- [Data model](#data-model)
-- [Auth & RBAC](#auth--rbac)
-- [Tech stack](#tech-stack)
-- [Getting started](#getting-started)
-- [Available scripts](#available-scripts)
-- [Project structure](#project-structure)
-- [Environment variables](#environment-variables)
-- [Further reading](#further-reading)
+- [Tech Stack](#tech-stack)
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Database Schema / ERD](#database-schema--erd)
+- [Prerequisites](#prerequisites)
+- [Installation & Setup](#installation--setup)
+- [Environment Variables](#environment-variables)
+- [Running the App](#running-the-app)
+- [Running Migrations](#running-migrations)
+- [API Endpoints](#api-endpoints)
+- [Further Reading](#further-reading)
 - [Testing](#testing)
 
 ---
 
-## Domain model — the order lifecycle
+## Tech Stack
 
-Every order is a state machine. Its `status` column can only move forward along the arrows below — there is no going back a step:
+Read directly from `package.json` and the code that uses each dependency.
+
+| Concern | Library | Notes |
+| --- | --- | --- |
+| Runtime | Node.js + TypeScript | strict mode, decorators enabled (`experimentalDecorators`, `emitDecoratorMetadata`) |
+| HTTP framework | `express` v5 | |
+| Request validation | `class-validator` + `class-transformer` | request DTOs only — response DTOs are plain classes with a static `from()` factory |
+| Dependency injection | `tsyringe` | container in `src/lib/di/container.ts`, symbol tokens in `src/lib/di/tokens.ts` |
+| Env validation | `zod` | `src/lib/config/env.ts` — the process refuses to boot if a required var is missing |
+| Database driver | `knex` over `pg` | **no ORM** — query builder + raw SQL only |
+| Cache / locks / presence | `ioredis` | |
+| Auth | `jsonwebtoken` | verifies the same JWT `core-service` issues (shared secret) |
+| Password hashing | `bcrypt` | listed as a dependency; **not referenced anywhere in `src/`** — this service doesn't handle credentials, that's core-service's job |
+| Real-time | `socket.io` + `@socket.io/redis-adapter` | WS server attached to the same HTTP server; Redis adapter fans messages out across worker processes |
+| Message broker | RabbitMQ via `amqplib` (+ `amqp-connection-manager`) | inbound consumer for `core-service` events, plus an outbound transactional outbox |
+| Payments | Kashier v3 (Payment Sessions + Webhooks) | custom HTTP client in `src/pkg/payments/kashier/`, not an npm SDK |
+| Background jobs | `node-cron` | drives the assignment tick, the outbox drain, and the archival worker |
+| IDs | `uuid` | client-facing order ids (`public_id`) |
+| Misc | `helmet`, `cors`, `cookie-parser`, `dotenv` | standard Express hardening/config middleware |
+
+Dev tooling: `typescript`, `tsx` (dev/watch runner), `ts-node` (used by the Knex CLI). There is no test runner dependency (no `jest`/`vitest`/`mocha`) and no lint config in `package.json` — see [Testing](#testing).
+
+---
+
+## Features
+
+Everything below is implemented and reachable through a documented endpoint or background job — not aspirational.
+
+- **Order placement** (`POST /orders`) — validates the branch/products/stock and customer address against `core-service` (cached), computes totals in integer minor units, reserves stock, and writes the order + line items in one DB transaction. Supports both `cod` and `online` payment methods.
+- **A full order status lifecycle**, enforced per-actor:
+
+  ```
+                   ┌─── pending_payment ───┐   (online only)
+                   │           │           │
+                   │  payment captured     │  payment times out / customer cancels
+                   │           ▼           ▼
+                   └──────► placed ───────────────► cancelled
+                               │
+                restaurant declines            restaurant accepts
+                               │                       │
+                               ▼                       ▼
+                           rejected               accepted ─► cancelled (restaurant)
+                                                       │
+                                                       ▼
+                                                  preparing ─► cancelled (restaurant)
+                                                       │
+                                                       ▼
+                                                    ready ─► cancelled (restaurant)
+                                                       │
+                                       auto-assignment worker claims an agent
+                                                       ▼
+                                                  assigned ─► cancelled (admin only)
+                                                       │
+                                         agent confirms pickup
+                                                       ▼
+                                                    picked   (no cancel from here on)
+                                                       │
+                                         agent confirms drop-off
+                                                       ▼
+                                                  delivered   (terminal — settles money)
+  ```
+
+- **Online payments via Kashier v3** — a payment session is created automatically as part of order placement (`OrderService.placeOrder` → `PaymentService.initOnlinePayment`; there is no separate `POST /payments/init` endpoint in the shipped code, unlike what `docs/business-logic/payments.md` originally planned). Confirmation arrives via an HMAC-verified webhook (`POST /payments/webhook/kashier`), de-duplicated by a unique index on `(provider_id, provider_event_id)` so Kashier's at-least-once retries are safe.
+- **Cash on delivery** — no external call at all; the `cod_collection` ledger entry is written directly by the settlement transaction when the order is marked `delivered`.
+- **A single money ledger** (`transactions`) for every charge, COD collection, commission, payout, and adjustment — amounts are always positive integers in minor units; direction is encoded by `(transaction_type, src_acc_id, dst_acc_id)`.
+- **Automatic delivery assignment** — a background worker tick (`ASSIGNMENT_TICK_SEC`, default 10s, per region) finds `ready` orders, geo-searches Redis for nearby online agents, and broadcasts a claimable offer; the offer and the claim are both `SETNX`-guarded so exactly one agent wins a race. Falls back to an admin-forced assignment endpoint if no agent claims it within the retry budget.
+- **Delivery agent presence** — entirely in Redis (a 5-minute TTL hash + a geo set), no database table, no audit requirement.
+- **Money settlement on delivery** — one transaction that computes the platform commission, credits the restaurant's running balance, and records the agent's earning — all idempotent via unique constraints, so a retried request can never double-credit anyone.
+- **Restaurant finance** — a running balance per `(restaurant, currency)` and admin-recorded payouts (payouts are a `transaction_type`, not a separate table).
+- **Real-time updates** over Socket.IO (`@socket.io/redis-adapter`-backed, so any worker process can deliver to a socket held by any other) — every status change, offer, and claim is pushed to the relevant customer/restaurant/branch/agent room instantly.
+- **Region-sharded Postgres** — one "hot" cluster per country (`eg`, `ksa`, ...), resolved per request from `?region=` → `X-Region` header → a `region` cookie, never from the JWT.
+- **Nightly cold-archival worker** — moves every row older than the current year (across 6 tables, FK-safe order, batched, Redis-locked, crash-safe) from each region's hot cluster to a parallel archive cluster. Order reads transparently follow the data — see [`docs/business-logic`](./docs/business-logic) and the module comments in `src/lib/jobs/archival.worker.ts` for the full mechanics.
+- **Inbound event consumption** — a RabbitMQ consumer binds to `core-service`'s `core.events` exchange (`product.#`, `branch.#`, `restaurant.#`, `rbac.#`) and invalidates the corresponding Redis cache entries, with `SETNX`-based dedupe and a dead-letter queue for poison messages.
+- **Outbound transactional outbox** — domain events are written to an `events_outbox` table in the same transaction as the change that produced them, then drained to a RabbitMQ exchange by a separate cron tick with `FOR UPDATE SKIP LOCKED` batching and publisher-confirm-gated dispatch.
+- **Idempotency** — every write endpoint that costs money or creates a resource requires an `Idempotency-Key` header, backed by Redis with a Postgres fallback table on the most critical paths (order placement, payouts).
+- **JWT auth shared with `core-service`**, and RBAC resolved through a Redis-cached read-through projection of `core-service`'s permission catalog rather than a local copy.
+- **zod-validated configuration** — a missing required environment variable fails the process at boot with a clear error instead of an obscure runtime crash later.
+
+**Not yet implemented** (present in the design docs, absent from the code): a `POST /payments/:id/refund` endpoint and any refund service logic.
+
+---
+
+## Project Structure
+
+Excludes `node_modules/`, `dist/` (build output, gitignored), and `.git/`. There is no `coverage/` directory (no test runner configured yet).
 
 ```
-                 ┌─── pending_payment ───┐   (online payment only; skipped entirely for COD)
-                 │           │           │
-                 │  payment captured     │  payment never completes (15 min sweep, or
-                 │  (Kashier webhook)    │  customer cancels within the window)
-                 │           ▼           ▼
-                 └──────► placed ───────────────► cancelled
-                             │
-              restaurant declines            restaurant accepts
-                             │                       │
-                             ▼                       ▼
-                         rejected               accepted ───► cancelled (restaurant, with reason)
-                                                     │
-                                                     ▼
-                                                preparing ───► cancelled (restaurant, with reason)
-                                                     │
-                                                     ▼
-                                                  ready ───► cancelled (restaurant, with reason)
-                                                     │
-                                     auto-assignment worker claims an agent
-                                                     ▼
-                                                assigned ───► cancelled (admin only)
-                                                     │
-                                       agent confirms pickup at the branch
-                                                     ▼
-                                                  picked                 (no cancel from here —
-                                                     │                    food is in transit)
-                                       agent confirms drop-off
-                                                     ▼
-                                                delivered  (terminal — triggers money settlement)
+order-service/
+├── .env.example              # template for .env — every var this service reads, with placeholders
+├── CLAUDE.md                  # coding conventions & layering rules this codebase follows
+├── package.json / package-lock.json
+├── tsconfig.json
+├── docs/                      # design docs — architecture, schema, API contracts, business logic, build plan
+│   └── business-logic/          # one file per module: lifecycle, invariants, RBAC
+├── scripts/                   # one-off / operational scripts, run with `npx tsx`
+│   ├── migrate-all.ts           # runs `migrate:latest` across every region (hot or archive cluster)
+│   └── create-partitions.ts     # pre-creates monthly `orders` partitions
+├── play/                      # gitignored local smoke-test scripts — not part of the shipped app
+└── src/
+    ├── app.ts                 # Express composition: helmet, cors, json (raw body kept for webhook HMAC), cookies, correlation id, region resolver, routes, error handler
+    ├── server.ts                # HTTP API process: boots the app, attaches the WS server, pings every shard, connects RabbitMQ, starts the inbound event consumer
+    ├── worker.ts                 # background worker process: no HTTP listener — registers the assignment/outbox/archival cron jobs and starts the scheduler
+    ├── routes.ts                 # mounts every module's router under /api
+    │
+    ├── app/                     # business modules — one folder per bounded context
+    │   ├── health/                 # GET /api/health
+    │   ├── order/                   # placement, status machine, customer/restaurant order reads
+    │   ├── payment/                   # Kashier sessions, webhook processing, the transactions ledger
+    │   ├── assignment/                 # the auto-assignment worker + admin override
+    │   ├── agent/                       # presence, task list, earnings, in-flight order actions
+    │   └── finance/                      # restaurant balance reads + payout recording
+    │
+    │       Each module repeats the same skeleton:
+    │       controller/<m>.controller.ts   — @injectable; validate → call service → map to response DTO → respond
+    │       service/<m>.service.ts         — @injectable; the actual business logic, throws AppError
+    │       repository/<m>.repo.ts         — exported functions (not classes), each takes an optional `conn: Knex`
+    │       entity/<m>.entity.ts           — plain class, no DB knowledge
+    │       dto/<m>.request.dto.ts         — class-validator-decorated request shapes
+    │       dto/<m>.response.dto.ts        — response payload shape, static from(entity) factory
+    │       enums.ts / errors.ts / types.ts / routes.ts
+    │
+    ├── lib/                     # app-aware glue — may import pkg/ and env, never app/<module>/* directly
+    │   ├── auth/                   # JWT guard, RBAC middleware, restaurant/branch membership checks
+    │   ├── cache/                   # Redis client init + withCache(ttl) response-caching middleware
+    │   ├── config/env.ts             # zod-validated env — the single source of truth for all configuration
+    │   ├── core-client/              # sync HTTP client to core-service (branches, products, addresses, RBAC)
+    │   ├── core-events/               # inbound RabbitMQ consumer: core.events → cache invalidation handlers
+    │   ├── correlation/                # X-Correlation-Id propagation middleware
+    │   ├── di/                          # tsyringe container + TOKENS symbol registry
+    │   ├── error/                        # AppError + the central Express error handler
+    │   ├── events/                        # outbound transactional outbox (order.events) + its drain job
+    │   ├── http/                           # sendSuccess/sendPaginated + cursor-based pagination helpers
+    │   ├── idempotency/                     # Idempotency-Key middleware (Redis + Postgres fallback)
+    │   ├── jobs/                             # generic cron job registry/scheduler + the archival worker
+    │   │   ├── job-registry.ts, job.types.ts, scheduler.ts     # generic "register a cron job" infra
+    │   │   ├── archival.worker.ts              # orchestrates one nightly archival run per region
+    │   │   ├── archival.helpers.ts             # the per-table batch-move loop + JSON-column handling
+    │   │   └── archival.types.ts               # ArchivalTableSpec / ArchivalRunResult types
+    │   ├── knex/                                # db(region) (hot) / dbArchive(region) (archive) connections
+    │   ├── logger/                               # structured JSON logger
+    │   ├── messaging/                             # AMQP connection lifecycle
+    │   ├── rbac/                                   # read-through permission cache backed by core-service
+    │   ├── sharding/                                # region resolver (query > header > cookie) + region list
+    │   ├── validation/                               # validateBody(DTO, req.body)
+    │   └── websocket/                                 # socket.io server, channel auth, Redis adapter wiring
+    │
+    ├── pkg/                     # framework- and app-agnostic — no imports from lib/ or app/, no env access
+    │   ├── cache/                  # ICacheProvider interface + the ioredis implementation
+    │   ├── messaging/                # IMessageBroker interface + the amqplib/RabbitMQ client
+    │   ├── payments/                   # IPaymentProvider interface + the Kashier HTTP client
+    │   └── utils/                        # money.ts (minor-unit helpers), time.ts (date helpers), retry.ts
+    │
+    └── migrations/               # knex migrations — raw SQL inside up()/down(), snake_case tables/columns
 ```
 
-| Status | Meaning | Who moves it |
-| --- | --- | --- |
-| `pending_payment` | Online order created, waiting on Kashier | system (webhook), customer (cancel within the window) |
-| `placed` | In the restaurant's queue | system (transition only) |
-| `accepted` | Restaurant will cook it | restaurant staff/manager/owner |
-| `rejected` | Restaurant declined — terminal | restaurant |
-| `preparing` | Actively being cooked | restaurant |
-| `ready` | Food's ready — eligible for delivery assignment | restaurant |
-| `assigned` | An agent has been matched | the auto-assignment worker, or admin override |
-| `picked` | Agent has the food | the assigned agent |
-| `delivered` | Customer has it — terminal, settles money | the assigned agent |
-| `cancelled` | Cancelled before delivery | system / restaurant / customer / admin, depending on the current status |
-
-The customer's cancel window is intentionally short (while `pending_payment` or `placed`, and no more than 60 seconds after placement) — past that, only the restaurant or an admin can cancel.
+See [`docs/folder-structure.md`](./docs/folder-structure.md) for the (partially aspirational — some module names there differ from what actually shipped) fully annotated version, and [`CLAUDE.md`](./CLAUDE.md) §3–§5 for the naming/module conventions every file follows.
 
 ---
 
-## How an order actually flows through the system
+## Database Schema / ERD
 
-This is the story that ties every module together — worth reading before diving into any one piece.
+This service uses **plain Knex migrations with raw SQL** — there is no ORM, no schema file, and no seed script (`src/migrations/`, 9 files, one table each; `scripts/` has no seeding utility). The tables below are every entity actually created by those migrations, read directly from their `CREATE TABLE` statements.
 
-1. **Placement — `app/order`.** A customer calls `POST /orders`. The service resolves which region (country) shard the order belongs to from the chosen branch, validates the branch is open and the restaurant is active (via `core-service`, cached), fetches live prices/stock for every line item in a single batched call, computes `subtotal + delivery_fee + service_fee = total` in integer minor units, reserves stock in `core-service`, and inserts the `orders` + `order_items` rows in one DB transaction on that region's hot shard. A COD order goes straight to `placed`; an online order goes to `pending_payment`.
+```mermaid
+erDiagram
+    ORDERS ||--o{ ORDER_ITEMS : "has line items"
+    ORDERS ||--o{ PAYMENT_SESSIONS : "has checkout sessions"
+    ORDERS ||--o{ TRANSACTIONS : "generates"
+    ORDERS ||--o| AGENT_EARNINGS : "settles to"
+    PAYMENT_PROVIDERS ||--o{ PAYMENT_SESSIONS : "processes"
+    PAYMENT_PROVIDERS ||--o{ TRANSACTIONS : "processes"
+    PAYMENT_PROVIDERS ||--o{ PAYMENT_WEBHOOK_EVENTS : "sends"
 
-2. **Payment (online only) — `app/payment`.** Still inside the same request, for an online order the order service hands off to `PaymentService.initOnlinePayment`, which creates a Kashier Payment Session and stores a `payment_sessions` row, returning a redirect URL to the client. There is no separate "init payment" endpoint to call — it's folded into order placement to keep the client flow to one round trip. When the customer pays, Kashier calls `POST /payments/webhook/kashier`: the handler verifies the HMAC signature, de-dupes by `(provider_id, provider_event_id)` (a duplicate webhook is a 200 no-op), writes a `charge` row to the `transactions` ledger, and flips the order to `placed`. A failed COD order never touches this module — `cod_collection` is written later, on delivery (see step 6).
+    ORDERS {
+        bigint id PK
+        text region
+        uuid public_id
+        text country_code
+        bigint restaurant_id "core-service FK, logical"
+        bigint restaurant_owner_id "core-service FK, logical"
+        bigint branch_id "core-service FK, logical"
+        bigint customer_id "core-service FK, logical"
+        bigint customer_address_id "core-service FK, logical"
+        decimal delivery_lat
+        decimal delivery_lng
+        text delivery_address_text_snapshot
+        decimal branch_lat
+        decimal branch_lng
+        text status
+        int subtotal
+        int delivery_fee
+        int service_fee
+        int total
+        int commission
+        text currency
+        text payment_method
+        bigint delivery_agent_id "core-service FK, logical"
+        timestamp created_at PK
+        timestamp updated_at
+        timestamp accepted_at
+        timestamp rejected_at
+        timestamp ready_at
+        timestamp assigned_at
+        timestamp picked_at
+        timestamp delivered_at
+        timestamp cancelled_at
+    }
 
-3. **Restaurant workflow — `app/order`.** The restaurant dashboard drives `placed → accepted → preparing → ready` (or `rejected`/`cancelled`) via `PATCH /restaurants/:restaurantId/branches/:branchId/orders/:publicId/status`. Every transition is validated against the status machine for that actor, stamps the matching `<verb>_at` column in the same transaction, and broadcasts a `order.status_changed` WebSocket event to the customer and the branch.
+    ORDER_ITEMS {
+        bigint id PK
+        text region
+        bigint order_id "FK to orders.id, app-enforced"
+        bigint product_id "core-service FK, logical"
+        int quantity
+        int unit_price_snapshot
+        text name_snapshot
+        text image_url_snapshot
+        int line_total
+        timestamp created_at
+    }
 
-4. **Assignment — `app/assignment`.** A background worker tick (every `ASSIGNMENT_TICK_SEC`, default 10s, one per region) scans for `ready` orders with no agent yet, geo-searches Redis for the nearest online, non-busy agents (`GEOSEARCH` against the region's presence set), and broadcasts a claimable offer to the top candidates over WebSocket. The offer and the eventual claim are both Redis `SETNX` locks (`offer:order:<id>`, `claim:order:<id>`) so exactly one agent can win a race, and the loser gets notified their offer was claimed elsewhere.
+    PAYMENT_PROVIDERS {
+        int id PK
+        text name UK
+        boolean is_enabled
+        smallint priority
+    }
 
-5. **Fulfillment — `app/agent`.** The winning agent calls `POST /agents/orders/:publicId/accept`, which atomically flips the order to `assigned` and marks the agent busy. From there the agent drives `assigned → picked → delivered` via `PATCH /agents/orders/:publicId/status`.
+    PAYMENT_SESSIONS {
+        bigint id PK
+        text region
+        bigint order_id "FK to orders.id, app-enforced"
+        int provider_id FK
+        text provider_session_id UK
+        text redirect_url
+        int amount
+        text currency
+        text status
+        jsonb raw_init_payload
+        jsonb raw_last_payload
+        timestamp created_at
+        timestamp updated_at
+    }
 
-6. **Settlement — `app/agent` + `app/finance`.** The `delivered` transition is the one place money actually moves, all in a single transaction: it computes the platform commission, writes a `commission` transaction (and, for COD orders, the `cod_collection` transaction that was deferred from step 1), credits `restaurant_balances` with `subtotal - commission`, and writes an `agent_earnings` row for the delivery agent's share of the delivery fee. Every one of those inserts is idempotent (unique constraints on `idempotency_key` / `order_id`), so a retried request can never double-credit anyone.
+    TRANSACTIONS {
+        bigint id PK
+        text region
+        bigint order_id "FK to orders.id, nullable, app-enforced"
+        text transaction_type
+        text method
+        int provider_id "FK, nullable"
+        text provider_reference_id
+        text status
+        int amount
+        text currency
+        bigint src_acc_id "core-service user id, logical"
+        bigint dst_acc_id "core-service user id, logical"
+        boolean is_refunded
+        bigint refunded_payment_id
+        text idempotency_key UK
+        timestamp created_at
+        timestamp updated_at
+    }
 
-7. **Payouts — `app/finance`.** Whenever operations actually wires money to a restaurant's bank account, an admin calls `POST /admin/restaurants/:restaurantId/payouts`, which locks the balance row, checks sufficient funds, writes a `payout` transaction, and debits the balance. The restaurant can read its running balance and payout history at any time.
+    PAYMENT_WEBHOOK_EVENTS {
+        bigint id PK
+        text region
+        int provider_id FK
+        text provider_event_id UK
+        text signature
+        jsonb payload
+        timestamp received_at
+        timestamp processed_at
+        text process_error
+    }
 
-8. **Everything is real-time.** Every status change and assignment event above is pushed over WebSocket to the relevant `customer:<id>`, `restaurant:<id>`, `branch:<id>`, and `agent:<id>` rooms the instant it happens, so none of the four client apps need to poll.
+    RESTAURANT_BALANCES {
+        bigint restaurant_id PK "core-service FK, logical"
+        text region
+        text currency PK
+        int balance
+        timestamp updated_at
+    }
 
-9. **Aging out.** Once an order's `created_at` rolls into a prior year, the [cold archival worker](#the-archival-worker-newest-addition) quietly moves it — and everything that hangs off it (items, transactions, payment sessions, webhook log, agent earning) — from the hot database to a per-region archive database, overnight, in batches, with no customer-visible downtime. Reads for that data keep working exactly the same; they're just transparently routed to wherever the row now lives.
+    AGENT_EARNINGS {
+        bigint id PK
+        text region
+        bigint agent_id "core-service FK, logical"
+        bigint order_id "FK to orders.id, UK, app-enforced"
+        int amount
+        text currency
+        timestamp earned_at
+    }
+
+    EVENTS_OUTBOX {
+        bigint id PK
+        text aggregate_type
+        text aggregate_id
+        text event_type
+        uuid event_id UK
+        jsonb payload
+        timestamp created_at
+        timestamp dispatched_at
+        int attempts
+        text last_error
+    }
+```
+
+Notes that don't fit in a diagram:
+
+- **`orders` is partitioned** (native Postgres `PARTITION BY RANGE (created_at)`, monthly), which is *why* its primary key is the composite `(id, created_at)` rather than just `id` — Postgres requires the partition key inside the PK. `npm run partitions:create` pre-creates the next 12 months; anything outside the pre-created range still lands safely in a catch-all `orders_default` partition.
+- **No FK constraints to `orders`** from `order_items`, `payment_sessions`, `transactions`, or `agent_earnings` — Postgres foreign keys must target a table's full unique key, and `orders`' key includes the partition column, so these relationships are enforced in application code instead (every write to these tables happens inside the same service that wrote the order). This is a deliberate, documented trade-off, not an oversight — see the comment at the top of each migration file.
+- **Cross-service references** (columns that logically point at rows this database doesn't contain, owned instead by `core-service`): `orders.restaurant_id`/`restaurant_balances.restaurant_id` → `restaurants`; `orders.customer_id`/`orders.restaurant_owner_id`/`orders.delivery_agent_id`/`transactions.src_acc_id`/`transactions.dst_acc_id`/`agent_earnings.agent_id` → `users`; `orders.customer_address_id` → `customer_addresses`; `orders.branch_id` → `restaurant_branches`; `order_items.product_id` → `products`. These are validated at write time via a sync HTTP call to `core-service` (cached), never a DB-level FK, since the two services have separate databases.
+- **Money is always an integer in minor units** (piasters, halalas), never `DECIMAL` — decimal values coming back from the `pg` driver as strings is an easy source of silent bugs; integer math is exact.
+- **Every table carries a `region` column** and lives on a connection already pinned to that region's shard — there's no cross-region filtering happening at the SQL level, the connection itself is the shard boundary. `payment_providers` is the one exception: a small, identical lookup table replicated to every shard.
+- **Hot vs. archive**: every table above exists twice per region — once in the "hot" database (current year) and once in a separate "archive" database with an identical schema, populated by the nightly archival worker. `events_outbox` and `payment_providers` are the exceptions (outbox is drained and deleted, not archived; providers are a small replicated lookup).
 
 ---
 
-## Modules, in depth
+## Prerequisites
 
-Every module under `src/app/<name>/` follows the same internal shape (see [Project structure](#project-structure)): `entity/` (plain classes), `dto/*.request.dto.ts` + `dto/*.response.dto.ts`, `repository/*.repo.ts` (exported functions, not classes — every function takes an optional `conn: Knex` so it composes into any transaction), `service/*.service.ts` (`@injectable`, holds the actual business logic), `controller/*.controller.ts` (`@injectable`, does *only* validate → call service → map to a response DTO → respond), `routes.ts`, `enums.ts`, `errors.ts`, `types.ts`.
-
-### Orders (`app/order`)
-
-Owns order placement, the status machine, and every order read path (customer history, restaurant lists, single-order lookup, admin overrides). See the [lifecycle](#domain-model--the-order-lifecycle) and [flow](#how-an-order-actually-flows-through-the-system) above for the detail; [`docs/business-logic/orders.md`](./docs/business-logic/orders.md) has the full transition matrix and invariants.
-
-Notable design choices actually implemented:
-- Stock is reserved in `core-service` *after* the local DB transaction commits — if the reservation then fails, the order is voided and stock release is attempted, logged loudly if it can't be.
-- `GET /orders/:publicId` tries the hot cluster first; only `system_admin` or a restaurant `owner` get a retry against the archive cluster on a miss (a plain customer never pays that extra round trip — their orders are always recent).
-- `GET /restaurants/:id/branches/:id/orders` is cached for 10 seconds (`withCache`) and invalidated explicitly on every status transition for that branch — it doesn't rely on the TTL alone.
-
-### Payments (`app/payment`)
-
-Owns Kashier v3 online payment sessions, the webhook that confirms them, and the `transactions` money ledger (every charge, commission, payout, and refund is one row here). See [`docs/business-logic/payments.md`](./docs/business-logic/payments.md).
-
-- Online session creation is triggered automatically from inside `POST /orders` (`OrderService.placeOrder` calls `PaymentService.initOnlinePayment`) — there's no separate public "init payment" endpoint in the shipped implementation.
-- The webhook handler is the only unauthenticated write endpoint in the service; it trusts nothing except a valid HMAC signature, and de-dupes via a unique index on `(provider_id, provider_event_id)` so Kashier's at-least-once retries are safe.
-- Money is always integer minor units (piasters/halalas); `transactions.amount` is always positive, direction is encoded by `(transaction_type, src_acc_id, dst_acc_id)`.
-- **Refunds are documented in the design docs but not yet implemented** in this codebase — there's no `POST /payments/:id/refund` endpoint or refund service method today.
-
-### Assignment (`app/assignment`)
-
-The background worker that matches a `ready` order to a nearby delivery agent, plus the admin override to force-assign one. See [`docs/business-logic/deliveries.md`](./docs/business-logic/deliveries.md) — there is deliberately no `deliveries` table or `app/delivery` module; delivery state lives entirely on the `orders` row, and "delivery business logic" is split between this module (matching) and `app/agent` (the agent-side actions).
-
-- Candidate search is a single Redis `GEOSEARCH` against the region's presence geo-set, filtered to online + not-already-busy agents, ordered by distance.
-- The offer and the claim are both `SETNX`-guarded Redis keys, which is what makes "first agent to accept wins" race-safe without a DB lock.
-- Reassignment happens automatically (next worker tick, once an unclaimed offer expires) or immediately (an agent going offline while `assigned` releases their order back to `ready`). After `ASSIGNMENT_MAX_ATTEMPTS` rounds with no taker, the order sits in `ready` and raises an admin alert until `POST /admin/orders/:publicId/assign` unsticks it.
-
-### Agents (`app/agent`)
-
-Delivery-agent presence, their task list and earnings, and the in-flight order actions (accept/reject an offer, mark picked/delivered). See [`docs/business-logic/agents.md`](./docs/business-logic/agents.md).
-
-- Presence has no database table at all — it's a 5-minute Redis TTL hash (`presence:meta:<region>:<agentId>`) plus a geo set the assignment worker searches. Stop pinging, and the agent silently goes offline.
-- The `delivered` transition is where [settlement](#how-an-order-actually-flows-through-the-system) happens — the agent module and the finance module meet here in one transaction.
-
-### Finance (`app/finance`)
-
-Read views over a restaurant's running balance and payout history, plus the one admin write: recording a payout. See [`docs/business-logic/restaurant-finance.md`](./docs/business-logic/restaurant-finance.md).
-
-- **Payouts are not a separate table** — they're a `transaction_type='payout'` row in the same `transactions` ledger everything else uses, which is what makes "balance = sum of everything that ever happened to this restaurant" auditable from one table.
-- Balance reads never go through the cache — small, hot, single-row, and it has to be trustworthy for an owner deciding whether to trust the number.
-
-### The archival worker (newest addition)
-
-The only background job with no HTTP surface of its own — see the [dedicated section below](#the-cold-archival-worker) plus the [data model](#data-model).
+- **Node.js 18+** and npm
+- **PostgreSQL** reachable locally or remotely — **two databases per region**: one "hot", one "archive" (no Docker Compose file is present in this repo — provision Postgres/Redis/RabbitMQ yourself, or point the env vars at existing instances)
+- **Redis**
+- **RabbitMQ**
+- A running **`core-service`** instance — this service depends on it for JWT secrets, branch/product/address lookups, and the RBAC permission catalog. `order-service` will boot without it reachable, but most write endpoints and RBAC-gated reads will fail until it is.
 
 ---
 
-## API reference
+## Installation & Setup
 
-Every route is mounted under `/api`. Auth is a JWT in the `access_token` cookie (issued by `core-service`); region is resolved per-request from `?region=`, then the `X-Region` header, then a `region` cookie. All write endpoints that cost money or create resources require an `Idempotency-Key` header. See [`docs/api-contracts.md`](./docs/api-contracts.md) for full request/response bodies, headers, and error codes — this table is the map.
+### 1. Install dependencies
 
-### Orders
+```bash
+npm install
+```
 
-| Method & path | Auth | Purpose |
-| --- | --- | --- |
-| `POST /orders` | customer | Place an order (COD or online). Idempotent (strict). |
-| `GET /orders/:publicId` | customer (own) / restaurant member / admin | Order detail + items + status history. Archive fallback for admin/owner only. |
-| `GET /customer/orders?year=` | customer | Paginated order history for one calendar year (hot or archive). |
-| `PATCH /customer/orders/:publicId/status` | customer (own, within cancel window) | Cancel. Idempotent (strict). |
-| `GET /restaurants/:restaurantId/branches/:branchId/orders?status=&from=&to=` | restaurant member (`orders:read`) / admin | Paginated order list for a branch. Cached 10s; hot/archive/straddle-merged depending on `from`/`to`. |
-| `PATCH /restaurants/:restaurantId/branches/:branchId/orders/:publicId/status` | restaurant member (`orders:accept`/`orders:update`/`orders:cancel`) | Accept/reject/preparing/ready/cancel. Idempotent (strict). |
-| `PATCH /admin/orders/:publicId/status` | admin | Any transition the state machine allows for admin. Idempotent (strict). |
+### 2. Copy and configure the environment file
 
-### Payments
+```bash
+cp .env.example .env
+```
 
-| Method & path | Auth | Purpose |
-| --- | --- | --- |
-| `POST /payments/webhook/kashier?region=` | none — HMAC-verified | Kashier payment confirmation. De-duped, at-least-once safe. |
-| `GET /restaurants/:restaurantId/payments/:paymentId` | restaurant member (`payments:read`) / admin | One transaction's detail. |
+Then fill in `.env` with real values — **never commit it** (`.env` is gitignored; `.env.example` is not). See [Environment Variables](#environment-variables) below for what every value means. At minimum, these have no default and the app will not boot without them:
 
-### Assignment
+- `ACCESS_SECRET` / `REFRESH_SECRET` — must match `core-service`'s JWT secrets exactly.
+- `REGIONS` — comma-separated region codes (e.g. `eg,ksa`); each one needs its own `DB_<region>_*` and `ARCHIVE_DB_<region>_*` block.
+- `RABBITMQ_URL`
+- `CORE_SERVICE_BASE_URL` / `CORE_INTERNAL_API_KEY` — must match what `core-service` is actually configured to accept on its internal `api-key` header.
+- `KASHIER_MERCHANT_ID` / `KASHIER_API_KEY` / `KASHIER_SECRET_KEY` / `KASHIER_RETURN_URL` / `KASHIER_FAIL_URL` / `KASHIER_WEBHOOK_URL` — from your own Kashier sandbox account.
 
-| Method & path | Auth | Purpose |
-| --- | --- | --- |
-| `POST /admin/orders/:publicId/assign` | admin (`deliveries:assign`) | Force-assign a specific agent, bypassing distance/busy checks. Idempotent (strict). |
+> **Port note:** don't set `PORT` to a value on the Node/browser "bad ports" blocklist (e.g. `6000`, the X11 port) — `fetch()` and every browser silently refuse to connect to it even though `curl` still works.
 
-### Agents
+### 3. Create the databases
 
-| Method & path | Auth | Purpose |
-| --- | --- | --- |
-| `POST /agents/presence/online` | delivery agent | Go online at `{lat, lng}`. |
-| `POST /agents/presence/ping` | delivery agent | Refresh presence TTL / position. |
-| `POST /agents/presence/offline` | delivery agent | Go offline (blocked while `picked`). |
-| `POST /agents/orders/:publicId/accept` | delivery agent (offered) | Claim a broadcast offer. Idempotent (strict). |
-| `POST /agents/orders/:publicId/reject` | delivery agent (offered) | Decline an offer. |
-| `PATCH /agents/orders/:publicId/status` | delivery agent (assigned) | `picked` or `delivered` (delivered runs settlement). Idempotent (strict). |
-| `GET /agents/tasks?status=` | delivery agent | This agent's task list. |
-| `GET /agents/earnings?from=&to=` | delivery agent | This agent's earnings history. |
+For every region in `REGIONS`, create both its hot and archive database:
 
-### Finance
+```sql
+CREATE DATABASE order_service_eg;
+CREATE DATABASE order_service_archive_eg;
+CREATE DATABASE order_service_ksa;
+CREATE DATABASE order_service_archive_ksa;
+```
 
-| Method & path | Auth | Purpose |
-| --- | --- | --- |
-| `GET /restaurants/:restaurantId/balance` | restaurant member (`finance:read`) / admin | Current running balance per currency. |
-| `GET /restaurants/:restaurantId/payouts?from=&to=` | restaurant member (`finance:read`) / admin | Payout history. |
-| `POST /admin/restaurants/:restaurantId/payouts` | admin | Record a payout. Idempotent (strict). |
+(Database names are whatever you set for `DB_<region>_NAME` / `ARCHIVE_DB_<region>_NAME` — the ones above match `.env.example`.)
 
-### Health
+### 4. Run migrations
 
-| Method & path | Auth | Purpose |
-| --- | --- | --- |
-| `GET /health` | none | Pings every configured hot **and** archive shard; `200` if all reachable, else `503`. |
+See [Running Migrations](#running-migrations) below — do this before starting the app.
+
+### 5. Start Redis, RabbitMQ, and core-service
+
+All three need to be reachable before `order-service` will function correctly (see [Prerequisites](#prerequisites)).
+
+### 6. Run it
+
+See [Running the App](#running-the-app) below.
 
 ---
 
-## WebSocket events
+## Environment Variables
 
-`socket.io`, mounted on the same HTTP server as the API, backed by `@socket.io/redis-adapter` so any worker process can deliver to a socket held by any other worker. Clients authenticate with the same JWT (cookie, `?token=`, or handshake `auth`), then `subscribe` to the rooms they're allowed to join. Full payload shapes are in [`docs/business-logic/orders.md`](./docs/business-logic/orders.md) §12 and [`agents.md`](./docs/business-logic/agents.md) §9.
+Every variable below is read (via `zod`) in `src/lib/config/env.ts`, which is the **only** place `process.env` is read for application configuration — confirmed by searching the whole `src/` tree. Two scripts read a couple of extra, invocation-only variables that are **not** part of `.env`: `scripts/migrate-all.ts` and `src/lib/knex/knexfile.ts` read `CLUSTER` (`hot`/`archive`, defaults `hot`) and `REGION`, and `scripts/create-partitions.ts` also reads `MONTHS_AHEAD` — all three are meant to be passed on the command line per-invocation (`REGION=eg CLUSTER=archive npm run migrate`), not stored in `.env`.
+
+The full file, with a one-line comment on every variable:
+
+```bash
+# Example environment file for order-service.
+#
+# Copy this to `.env` (gitignored — never commit `.env`) and fill in real
+# values for your machine:
+#
+#   cp .env.example .env
+#
+# Every variable below is read by src/lib/config/env.ts (zod-validated at
+# boot — the process refuses to start if a required one is missing).
+
+PORT=4000
+NODE_ENV=development
+
+# Must match core-service's JWT secrets exactly — this service verifies the
+# same access-token cookie core-service issues.
+ACCESS_SECRET=replace-with-a-long-random-secret
+REFRESH_SECRET=replace-with-a-long-random-secret
+ACCESS_EXPIRES_IN=3600
+REFRESH_EXPIRES_IN=604800
+
+CORS_ORIGINS=http://localhost:3000
+
+# Comma-separated shard/region codes. Every region listed here needs a
+# matching DB_<region>_* and ARCHIVE_DB_<region>_* block below.
+REGIONS=eg,ksa
+
+DB_POOL_MAX=10
+DB_MIGRATION_DIRECTORY=src/migrations
+DB_MIGRATION_EXTENSION=ts
+
+# ── Hot cluster (current-year data) — one block per region in REGIONS ──────
+DB_eg_HOST=localhost
+DB_eg_PORT=5432
+DB_eg_USERNAME=postgres
+DB_eg_PASSWORD=replace-with-your-postgres-password
+DB_eg_NAME=order_service_eg
+
+DB_ksa_HOST=localhost
+DB_ksa_PORT=5432
+DB_ksa_USERNAME=postgres
+DB_ksa_PASSWORD=replace-with-your-postgres-password
+DB_ksa_NAME=order_service_ksa
+
+# ── Archive cluster (prior-year data, moved nightly by the archival worker)
+# Can point at the same Postgres instance as the hot cluster in local dev —
+# just needs to be a separate database per region.
+ARCHIVE_DB_eg_HOST=localhost
+ARCHIVE_DB_eg_PORT=5432
+ARCHIVE_DB_eg_USERNAME=postgres
+ARCHIVE_DB_eg_PASSWORD=replace-with-your-postgres-password
+ARCHIVE_DB_eg_NAME=order_service_archive_eg
+
+ARCHIVE_DB_ksa_HOST=localhost
+ARCHIVE_DB_ksa_PORT=5432
+ARCHIVE_DB_ksa_USERNAME=postgres
+ARCHIVE_DB_ksa_PASSWORD=replace-with-your-postgres-password
+ARCHIVE_DB_ksa_NAME=order_service_archive_ksa
+
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=
+
+RABBITMQ_URL=amqp://guest:guest@localhost:5672
+RABBITMQ_CORE_EVENTS_EXCHANGE=core.events
+RABBITMQ_CORE_EVENTS_QUEUE=order-service.core-events
+RABBITMQ_CORE_EVENTS_BINDINGS="product.#,branch.#,restaurant.#,rbac.#"
+RABBITMQ_CORE_EVENTS_DLX=core.events.dlx
+RABBITMQ_CORE_EVENTS_DLQ=order-service.core-events.dlq
+RABBITMQ_PREFETCH=32
+
+# Outbound: order.events exchange consumed by analytics-service & friends
+RABBITMQ_ORDER_EVENTS_EXCHANGE=order.events
+OUTBOUND_EVENTS_DRAIN_TICK_SEC=2
+OUTBOUND_EVENTS_BATCH_SIZE=100
+
+# core-service — this service's sync HTTP dependency for users/restaurants/
+# branches/products/RBAC. CORE_INTERNAL_API_KEY must match the value
+# core-service expects on the `api-key` header for internal routes.
+CORE_SERVICE_BASE_URL=http://localhost:3000
+CORE_INTERNAL_API_KEY=replace-with-core-services-internal-api-key
+
+WS_HEARTBEAT_SEC=30
+
+# Kashier v3 sandbox credentials — get these from your own Kashier sandbox
+# account, never reuse someone else's. No defaults; the app will not boot
+# without them.
+KASHIER_MERCHANT_ID=your-kashier-merchant-id
+KASHIER_API_KEY=your-kashier-api-key
+KASHIER_SECRET_KEY=your-kashier-secret-key
+KASHIER_RETURN_URL=https://example.com/checkout/success
+KASHIER_FAIL_URL=https://example.com/checkout/failure
+# Must be a publicly-reachable https URL (e.g. an ngrok tunnel to :4000) —
+# Kashier's create-session API rejects http/localhost redirect and webhook
+# URLs even against the test sandbox.
+KASHIER_WEBHOOK_URL=https://example.com/api/payments/webhook/kashier?region=eg
+KASHIER_BASE_URL=https://test-api.kashier.io
+KASHIER_FEP_BASE_URL=https://test-fep.kashier.io
+KASHIER_PAYMENT_TYPE=credit
+PAYMENT_SESSION_TIMEOUT_MIN=15
+# Regions that accept online (Kashier) payments; every other region is COD-only.
+ONLINE_PAYMENT_REGIONS=eg
+
+# ── Deliveries / agents ─────────────────────────────────────────────────────
+PRESENCE_STALE_SEC=300
+ASSIGNMENT_TICK_SEC=10
+ASSIGNMENT_RADIUS_METERS=5000
+ASSIGNMENT_CANDIDATES=5
+ASSIGNMENT_OFFER_TTL_SEC=30
+ASSIGNMENT_CLAIM_TTL_SEC=300
+ASSIGNMENT_MAX_ATTEMPTS=3
+ASSIGNMENT_BATCH=20
+AGENT_EARNING_SHARE_BPS=8000
+
+# ── Cold archival worker (nightly, moves prior-year rows hot -> archive) ───
+ARCHIVAL_CRON=0 3 * * *
+ARCHIVAL_TIMEZONE=UTC
+ARCHIVAL_BATCH_SIZE=1000
+ARCHIVAL_MAX_RUNTIME_MIN=60
+```
+
+This exact content lives in [`.env.example`](./.env.example) at the repo root — copy it, don't retype it.
+
+A couple of patterns worth knowing:
+
+- **Per-region shard config is dynamic**, not fixed keys in the zod schema: for every code in `REGIONS`, the app expects `DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (hot) and `ARCHIVE_DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (archive). Add a region to `REGIONS` and its two DB blocks, and it's live — no code change.
+- **Region is never in the JWT.** It's resolved per request from `?region=` query, then the `X-Region` header, then a `region` cookie.
+
+---
+
+## Running the App
+
+Two independent processes — both need Postgres (hot **and** archive), Redis, and RabbitMQ reachable to start cleanly.
+
+```bash
+npm run dev      # HTTP API on $PORT, hot-reloaded (tsx watch src/server.ts)
+npm run worker   # background jobs, hot-reloaded (tsx watch src/worker.ts):
+                  #   assignment tick, outbox drain, nightly archival
+```
+
+Production builds:
+
+```bash
+npm run build           # tsc compile to dist/
+npm run start            # node dist/server.js
+npm run start:worker     # node dist/worker.js
+```
+
+Verify the API is up and every shard is reachable:
+
+```bash
+curl http://localhost:4000/api/health
+```
+
+Returns `200` with a per-shard ping (both hot **and** archive, every region) if everything is reachable, `503` if any shard isn't.
+
+Every `package.json` script:
+
+| Script | Command | What it does |
+| --- | --- | --- |
+| `npm run dev` | `tsx watch src/server.ts` | API server, hot-reloaded |
+| `npm run worker` | `tsx watch src/worker.ts` | Background worker, hot-reloaded |
+| `npm run build` | `tsc` | Compiles `src/` to `dist/` |
+| `npm run start` | `node dist/server.js` | Runs the compiled API server |
+| `npm run start:worker` | `node dist/worker.js` | Runs the compiled background worker |
+| `npm run typecheck` | `tsc --noEmit` | Type-checks without emitting |
+| `npm run migrate` | `knex --knexfile src/lib/knex/knexfile.ts migrate:latest` | Applies migrations for one region/cluster (see below) |
+| `npm run migrate:rollback` | `knex ... migrate:rollback` | Rolls back the last migration batch for one region/cluster |
+| `npm run migrate:status` | `knex ... migrate:status` | Shows migration status for one region/cluster |
+| `npm run migrate:make` | `knex ... migrate:make` | Scaffolds a new migration file |
+| `npm run migrate:all` | `tsx scripts/migrate-all.ts` | Runs `migrate:latest` for **every** region in `REGIONS` |
+| `npm run partitions:create` | `tsx scripts/create-partitions.ts` | Pre-creates the next N months of `orders` partitions |
+
+There is no `npm run lint` or `npm test` script defined in `package.json` — see [Testing](#testing).
+
+No Dockerfile or `docker-compose.yml` exists in this repository; there's no containerized way to run this service or its dependencies today.
+
+---
+
+## Running Migrations
+
+This project uses **Knex's own migration CLI** directly (`knex --knexfile src/lib/knex/knexfile.ts ...`) — there's no Prisma/TypeORM/Sequelize involved, and every migration is raw SQL inside `up()`/`down()` (see `src/migrations/`). `src/lib/knex/knexfile.ts` picks the target database from two env vars read at invocation time, **not** from `.env`: `REGION` (required) and `CLUSTER` (`hot` or `archive`, defaults to `hot`).
+
+**Apply migrations** — one region/cluster at a time:
+
+```bash
+REGION=eg npm run migrate                     # hot cluster, region eg
+REGION=eg CLUSTER=archive npm run migrate      # archive cluster, region eg
+```
+
+**Every configured region at once** (`scripts/migrate-all.ts` loops `env.regions` and shells out to the command above for each):
+
+```bash
+npm run migrate:all                            # hot cluster, every region
+CLUSTER=archive npx tsx scripts/migrate-all.ts  # archive cluster, every region
+```
+
+Both clusters need migrating — the archive cluster runs the exact same migration set as hot (identical schema), and the [archival worker](#features) has nowhere to write until it's migrated.
+
+**Roll back the last batch:**
+
+```bash
+REGION=eg npm run migrate:rollback
+```
+
+**Check status:**
+
+```bash
+REGION=eg npm run migrate:status
+```
+
+**Scaffold a new migration:**
+
+```bash
+npm run migrate:make -- create_something
+```
+
+**Seeding**: there is no seed script or `seeds/` directory in this repository. The one piece of seed-like data is inline in a migration itself — `src/migrations/20260506000010_create_payment_providers.ts` conditionally inserts a `kashier` row into `payment_providers` when `REGION=eg` at migration time (other regions get no payment provider row, i.e. COD-only, unless a future migration or manual insert adds one).
+
+**Partitioning** (`orders` is partitioned by month on `created_at`) is a separate concern from migrations — run `npm run partitions:create` after migrating (see [Installation & Setup](#4-run-migrations) and the callout in the original setup guide about running it *before* real data accumulates, to avoid `check_default_partition_contents` errors).
+
+---
+
+## API Endpoints
+
+Every route is mounted under `/api` (see `src/routes.ts`). Auth is a JWT in the `access_token` cookie; region is resolved from `?region=` → `X-Region` header → `region` cookie. Write endpoints that create resources or move money require an `Idempotency-Key` header. This table is built directly from the `routes.ts` file in each module — see [`docs/api-contracts.md`](./docs/api-contracts.md) for full request/response bodies and error codes.
+
+### Orders (`src/app/order/routes.ts`)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/orders` | customer | Place an order (COD or online). Idempotent (strict). |
+| `GET` | `/orders/:publicId` | customer (own) / restaurant member / admin | Order detail + items + status history. |
+| `GET` | `/customer/orders` | customer | Paginated order history, `?year=`. |
+| `PATCH` | `/customer/orders/:publicId/status` | customer (own, within cancel window) | Cancel. Idempotent (strict). |
+| `GET` | `/restaurants/:restaurantId/branches/:branchId/orders` | restaurant member (`orders:read`) / admin | Paginated order list, `?status=&from=&to=`. Cached 10s. |
+| `PATCH` | `/restaurants/:restaurantId/branches/:branchId/orders/:publicId/status` | restaurant member | Accept/reject/preparing/ready/cancel. Idempotent (strict). |
+| `PATCH` | `/admin/orders/:publicId/status` | admin | Any transition the state machine allows for admin. Idempotent (strict). |
+
+### Payments (`src/app/payment/routes.ts`)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/payments/webhook/kashier` | none — HMAC-verified | Kashier payment confirmation, `?region=`. |
+| `GET` | `/restaurants/:restaurantId/payments/:paymentId` | restaurant member (`payments:read`) / admin | One transaction's detail. |
+
+### Assignment (`src/app/assignment/routes.ts`)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/admin/orders/:publicId/assign` | admin (`deliveries:assign`) | Force-assign a specific agent. Idempotent (strict). |
+
+### Agents (`src/app/agent/routes.ts`)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/agents/presence/online` | delivery agent | Go online at `{lat, lng}`. |
+| `POST` | `/agents/presence/ping` | delivery agent | Refresh presence TTL / position. |
+| `POST` | `/agents/presence/offline` | delivery agent | Go offline (blocked while `picked`). |
+| `POST` | `/agents/orders/:publicId/accept` | delivery agent (offered) | Claim a broadcast offer. Idempotent (strict). |
+| `POST` | `/agents/orders/:publicId/reject` | delivery agent (offered) | Decline an offer. |
+| `PATCH` | `/agents/orders/:publicId/status` | delivery agent (assigned) | `picked` or `delivered` (delivered runs settlement). Idempotent (strict). |
+| `GET` | `/agents/tasks` | delivery agent | This agent's task list, `?status=`. |
+| `GET` | `/agents/earnings` | delivery agent | This agent's earnings history, `?from=&to=`. |
+
+### Finance (`src/app/finance/routes.ts`)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/restaurants/:restaurantId/balance` | restaurant member (`finance:read`) / admin | Current running balance per currency. |
+| `GET` | `/restaurants/:restaurantId/payouts` | restaurant member (`finance:read`) / admin | Payout history, `?from=&to=`. |
+| `POST` | `/admin/restaurants/:restaurantId/payouts` | admin | Record a payout. Idempotent (strict). |
+
+### Health (`src/app/health/health.routes.ts`)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/health` | none | Pings every configured hot **and** archive shard; `200` if all reachable, else `503`. |
+
+### WebSocket events
+
+Not HTTP, but the other half of this service's client-facing surface: `socket.io`, mounted on the same HTTP server, authenticated with the same JWT. Clients subscribe to rooms (`customer:<id>`, `restaurant:<id>`, `branch:<id>`, `agent:<id>`) and receive:
 
 | Event | Room(s) | When |
 | --- | --- | --- |
@@ -226,340 +703,26 @@ Every route is mounted under `/api`. Auth is a JWT in the `access_token` cookie 
 | `task.cancelled` | `agent:<id>` | Their in-flight task was cancelled (admin) |
 | `assignment.exhausted` | `admin:alerts` | An order ran out of assignment attempts and needs a manual push |
 
----
-
-## Architecture
-
-### Request composition
-
-`app.ts` wires, in order: `helmet` → `cors` (credentialed) → JSON body parsing (raw body stashed for webhook HMAC verification) → `cookie-parser` → correlation-id middleware → region resolution → every module's router mounted under `/api` → the central error handler. `server.ts` boots that app on an `http.Server`, attaches the WebSocket server to the same server, pings every shard, connects to RabbitMQ, and starts the inbound `core.events` consumer. `worker.ts` is a second, separate process — no HTTP listener at all — that boots the same shared infra and hands control to a `node-cron` scheduler running the assignment tick, the outbox drain, and the nightly archival job.
-
-### Region sharding
-
-One Postgres cluster per country (`eg`, `ksa`, ...). A customer, the restaurant they're ordering from, and the agent delivering it are almost always in the same country, so country is the natural shard key — it gives high data locality and only rare, admin-only cross-shard reads. The column is called `region` (not `country`) so the router stays generic if a country ever needs sub-sharding later. Region is resolved per request (`?region=` → `X-Region` header → `region` cookie), never from the JWT — the same user can act in different regions across requests (e.g. an admin's fan-out view uses `region=all`).
-
-### Caching (Redis)
-
-- **Cross-service read-through cache** for data this service doesn't own but needs on the hot path — branch metadata, product price/stock, RBAC permissions — populated on demand from `core-service`, invalidated either by TTL or by an inbound `core.events` message.
-- **Endpoint response cache** (`withCache(ttl)`) on a couple of read-heavy, poll-prone endpoints (the branch order list, the agent task list), always paired with an explicit `del()` on the write path that would make it stale — the cache is a safety net for misbehaving pollers, not the source of freshness (that's the WebSocket push).
-- **Distributed locks** — assignment offers/claims and the archival worker's per-region lock are all the same primitive: Redis `SET key value NX EX ttl`.
-- **Idempotency keys** — `{METHOD}:{path}:{key}` in Redis with a 24h TTL, backed by a durable Postgres table on the critical write paths (order placement, payment init, payouts) so a Redis flush can't silently lose idempotency guarantees.
-- **Agent geo-presence** — a Redis geo set per region (`GEOADD`/`GEOSEARCH`) is what makes the assignment worker's "nearest 5 agents" query cheap; it's never persisted to Postgres.
-
-### Messaging (RabbitMQ) — inbound only
-
-This service never publishes synchronously to another service over the queue, and (per the original design docs) wasn't meant to publish *anything* outbound in this milestone — but the shipped code does include a transactional outbox (`lib/events/`) that drains to an `order.events` exchange for future consumers like an analytics service, alongside the one path the design explicitly called for:
-
-- **Inbound**: consumes `core.events` (`product.#`, `branch.#`, `restaurant.#`, `rbac.#`) for cache invalidation — a product's price changes in core, this service's cached copy gets evicted. Delivery is at-least-once; a Redis `SETNX` dedupe on the event id makes replays a safe no-op. Poison messages land in a dead-letter queue instead of blocking the consumer forever.
-- **Outbound**: `lib/events/outbox.repo.ts` writes an outbox row in the *same* DB transaction as the domain change it describes (so a crash between the two can't happen); a separate cron tick (`OUTBOUND_EVENTS_DRAIN_TICK_SEC`) claims a batch with `FOR UPDATE SKIP LOCKED` and publishes it, marking each row dispatched only after the broker confirms.
-
-### Kashier integration
-
-Online payments use Kashier's Payment Sessions API to start (called from inside order placement) and their Webhooks to confirm (`POST /payments/webhook/kashier`). The webhook's HMAC signature is verified before anything else happens; a verified but duplicate event (Kashier's own retries) is a 200 no-op thanks to the unique index on `(provider_id, provider_event_id)`. COD needs no external call at all — its money event is written directly by the settlement transaction when the order is marked `delivered`.
-
-### The cold archival worker
-
-`src/lib/jobs/archival.worker.ts`, scheduled by `registerArchivalJobs()` in `worker.ts`, one job per region (`ARCHIVAL_CRON`, default `0 3 * * *` UTC). Every run:
-
-1. Walks tables in FK-safe order — `agent_earnings → payment_webhook_events → payment_sessions → transactions → order_items → orders` — children before the `orders` parent, so a crash mid-run never leaves an archived order whose line items or ledger rows didn't make it across yet.
-2. Moves rows older than the current year in batches of `ARCHIVAL_BATCH_SIZE` (default 1000): insert into the archive cluster and commit, **then** delete from the hot cluster and commit. Archive-first means a crash between the two steps leaves a row in *both* places — safe, because a re-run just no-ops the re-insert (`ON CONFLICT DO NOTHING`) and still deletes it from hot — rather than in *neither*.
-3. Is guarded by a Redis lock (`archival:<region>:lock`) so two worker processes booting at once can't race the same region; the lock always releases, even on error.
-4. Respects `ARCHIVAL_MAX_RUNTIME_MIN` (default 60) — a run that's still going past budget stops cleanly and resumes on the next scheduled tick, rather than running forever.
-
-Every order read that could touch prior-year data is archive-aware: `GET /customer/orders?year=` routes entirely to hot or entirely to archive (a calendar year can never straddle the boundary); `GET /restaurants/:id/branches/:id/orders?from=&to=` fans out to both clusters and merges the results in memory when the requested range straddles the boundary; `GET /orders/:publicId` tries hot first and only retries archive for `system_admin` or a restaurant `owner`.
-
-### Failure modes (by design)
-
-| If this is down | What happens |
-| --- | --- |
-| Postgres | Requests to that shard fail (503-ish); other shards unaffected |
-| Redis | Cache misses fall through to the DB/core-client; idempotency falls back to its Postgres table; presence/assignment degrade (agents can't be matched) |
-| Kashier | COD is entirely unaffected; online checkout fails cleanly, order stays retryable in `pending_payment` |
-| `core-service` (sync) | Cached branches/products keep working; anything not yet cached fails |
-| RabbitMQ | The consumer reconnects with backoff; cached cross-service data gradually goes stale until TTL/live-lookup covers the gap |
+Full payload shapes: [`docs/business-logic/orders.md`](./docs/business-logic/orders.md) §12 and [`docs/business-logic/agents.md`](./docs/business-logic/agents.md) §9.
 
 ---
 
-## Data model
-
-Full schema, every index's justification, and the FK map live in [`docs/database-design.md`](./docs/database-design.md) — this is the shape to have in your head:
-
-- **`orders`** — the header row. Native Postgres declarative partitioning by month on `created_at` (see [`npm run partitions:create`](#5-optional-pre-create-monthly-partitions)); a `public_id` UUID is the client-facing id, the internal `id` never leaves the service.
-- **`order_items`** — line items, one INSERT of multiple rows per order, always fetched in bulk by `order_id` (never N+1).
-- **`transactions`** — the single money ledger: every charge, COD collection, commission, payout, refund, and adjustment is one row here. Amount is always positive; direction comes from `(transaction_type, src_acc_id, dst_acc_id)`.
-- **`payment_sessions`** — one row per Kashier checkout session, reconciled by the webhook.
-- **`payment_webhook_events`** — raw inbound webhook log, unique on `(provider_id, provider_event_id)` — this is what makes webhook processing at-least-once-delivered but effectively-once-applied.
-- **`payment_providers`** — small lookup table (`kashier`, etc.), replicated identically to every shard, not sharded itself.
-- **`restaurant_balances`** — one row per `(restaurant_id, currency)`, the running total; only ever moved inside a locked transaction (`SELECT ... FOR UPDATE`).
-- **`agent_earnings`** — one row per delivered order (unique on `order_id`), a snapshot of what that agent earned.
-- **`events_outbox`** — the transactional outbox for outbound `order.events`.
-
-There is deliberately **no `deliveries` table** (delivery state lives on `orders`) and **no `agent_presence` table** (presence is Redis-only, 5-minute relevance, no audit value).
-
-**Money is always an integer in minor units** (piasters, halalas — never `DECIMAL`), with a sibling `currency` column, because decimal arithmetic returning as strings from the DB driver is an easy source of silent bugs, and integer math is exact.
-
-**Every sharded table carries a `region` column** immediately after `id`, and every query against it goes through a connection already pinned to that region's shard (`db(region)` / `dbArchive(region)`) — there's no cross-shard `WHERE region = ?` filtering happening in application code, the connection itself is the shard boundary.
-
-**Hot vs. archive**: each region has two physically separate Postgres databases with an identical schema. The hot one holds the current year; the [archival worker](#the-cold-archival-worker) moves everything older into the archive one overnight, keeping the hot database small enough that current-year queries stay fast without ever deleting historical data outright.
-
----
-
-## Auth & RBAC
-
-- Authentication is the exact same JWT contract as `core-service` — an `access_token` cookie, verified with the same secret, carrying `userId`, `role`, and (for restaurant users) `restaurantId` / `restaurantRole` / `branchIds`.
-- This service keeps **no permission catalog of its own**. It extends `core-service`'s catalog with new permissions namespaced `orders:*`, `payments:*`, `deliveries:*`, `finance:*`, and resolves a role's permissions through a Redis-backed read-through cache of `core-service`'s RBAC endpoint (5-minute TTL, invalidated by an inbound `rbac.permissions_changed` event).
-- `system_admin` bypasses permission checks entirely.
-- Middleware handles two different questions:
-  - **"Is this actor even in scope for this resource?"** — `requireRestaurantMember(:restaurantId)` and `requireBranchAccess(:branchId)` compare the JWT's own claims against the route's path params, no DB lookup needed.
-  - **"Does this role have the permission?"** — `rbac({resource, action})` checks the cached permission projection.
-- A third layer — **row-level ownership** (a customer can only ever see their own order; a restaurant user can only see orders for branches they're a member of) — lives in the *service*, not middleware, because it needs a DB lookup of the actual resource.
-
----
-
-## Tech stack
-
-| Concern | Library / Tool |
-| --- | --- |
-| Runtime | Node.js + TypeScript (strict, decorators on) |
-| HTTP framework | `express` v5 |
-| Validation | `class-validator` + `class-transformer` |
-| DI | `tsyringe` |
-| Env validation | `zod` |
-| DB driver | `knex` over `pg` (no ORM) |
-| Cache | `ioredis` |
-| Auth | `jsonwebtoken` (same JWT contract as core-service) |
-| WebSocket | `socket.io` + `@socket.io/redis-adapter` |
-| Messaging | RabbitMQ via `amqplib` (inbound cache invalidation + an outbound transactional outbox) |
-| Payments | Kashier v3 (Payment Sessions + Webhooks) |
-| Background jobs | `node-cron` |
-
----
-
-## Prerequisites
-
-- Node.js 18+ and npm
-- PostgreSQL reachable locally (or remotely) — **two databases per region**: one hot, one archive
-- Redis
-- RabbitMQ
-- A running `core-service` instance (for auth JWT secrets, branch/product/address lookups, and the RBAC permission catalog) — order-service will boot without it, but most write endpoints and RBAC-gated reads will fail without it reachable
-
----
-
-## Getting started
-
-### 1. Install dependencies
-
-```bash
-npm install
-```
-
-### 2. Configure your environment
-
-Copy the example file and fill in real values — **never commit `.env`**:
-
-```bash
-cp .env.example .env
-```
-
-At minimum you must set (these have no defaults and the app refuses to boot without them):
-
-- `ACCESS_SECRET` / `REFRESH_SECRET` — must match core-service's JWT secrets exactly (same cookie, same signature).
-- `REGIONS` — comma-separated region codes, e.g. `eg,ksa`. Every region needs a matching `DB_<region>_*` and `ARCHIVE_DB_<region>_*` block (see `.env.example` for the pattern).
-- `RABBITMQ_URL`
-- `CORE_SERVICE_BASE_URL` / `CORE_INTERNAL_API_KEY` — the internal `api-key` header value core-service expects. This must match what core-service is actually configured to accept, or every RBAC-gated / branch-lookup call will 401.
-- `KASHIER_MERCHANT_ID` / `KASHIER_API_KEY` / `KASHIER_SECRET_KEY` / `KASHIER_RETURN_URL` / `KASHIER_FAIL_URL` / `KASHIER_WEBHOOK_URL` — from your own Kashier sandbox account.
-
-Everything else has a sensible default (see `.env.example` for the full list, including the archival worker's `ARCHIVAL_*` settings).
-
-> **Port note:** don't set `PORT` to a value on the browser/Node "bad ports" blocklist (e.g. `6000`, the X11 port) — `fetch()` and every browser will silently refuse to connect to it even though `curl` still works.
-
-### 3. Create the databases
-
-For every region in `REGIONS`, create both its hot and archive database (names come from `DB_<region>_NAME` / `ARCHIVE_DB_<region>_NAME` in your `.env`):
-
-```sql
-CREATE DATABASE order_service_eg;
-CREATE DATABASE order_service_archive_eg;
-CREATE DATABASE order_service_ksa;
-CREATE DATABASE order_service_archive_ksa;
-```
-
-### 4. Run migrations
-
-Hot cluster, all configured regions in one pass:
-
-```bash
-npm run migrate:all
-```
-
-Archive cluster (same migration set — hot and archive share an identical schema):
-
-```bash
-CLUSTER=archive npx tsx scripts/migrate-all.ts
-```
-
-Or per-region/per-cluster manually (`CLUSTER` defaults to `hot`):
-
-```bash
-REGION=eg npm run migrate
-REGION=eg CLUSTER=archive npm run migrate
-```
-
-### 5. (Optional) Pre-create monthly partitions
-
-`orders` is partitioned by `created_at`. New partitions for the next 12 months are pre-created by:
-
-```bash
-npm run partitions:create
-```
-
-Run this once after migrating, and monthly thereafter so the rolling window stays ahead of `NOW()` (rows outside all pre-created partitions still land safely in the `orders_default` catch-all).
-
-> **Do this before real/test orders accumulate.** Postgres refuses to create a new partition for a month that already has matching rows sitting in `orders_default` (`ERROR: ... would be violated by some row`, `check_default_partition_contents`). On a fresh database right after migrating, `orders_default` is empty and this is a non-issue; if you place orders first and run this later, you'll need to move those rows into a proper partition manually (or just leave them in `orders_default` — it's a correctness no-op, only a minor performance one).
-
-### 6. Start Redis, RabbitMQ, and core-service
-
-All three need to be reachable before you start order-service.
-
-### 7. Run it
-
-Two separate processes:
-
-```bash
-npm run dev      # HTTP API on $PORT, with hot-reload
-npm run worker   # background jobs: assignment tick, outbox drain, nightly archival
-```
-
-Or the production builds:
-
-```bash
-npm run build
-npm run start          # node dist/server.js
-npm run start:worker   # node dist/worker.js
-```
-
-### 8. Verify it's up
-
-```bash
-curl http://localhost:4000/api/health
-```
-
-Returns `200` with a per-shard ping (both hot **and** archive, every region) if everything is reachable, `503` if any shard isn't.
-
----
-
-## Available scripts
-
-| Script | What it does |
-| --- | --- |
-| `npm run dev` | API server, hot-reloaded (`tsx watch src/server.ts`) |
-| `npm run worker` | Background worker, hot-reloaded (`tsx watch src/worker.ts`) |
-| `npm run build` | `tsc` compile to `dist/` |
-| `npm run start` | Run the compiled API server |
-| `npm run start:worker` | Run the compiled background worker |
-| `npm run typecheck` | `tsc --noEmit` |
-| `npm run migrate` | `knex migrate:latest` for one region (`REGION=eg npm run migrate`) — cluster via `CLUSTER=hot\|archive`, defaults to `hot` |
-| `npm run migrate:rollback` | Roll back the last migration batch for one region |
-| `npm run migrate:status` | Show migration status for one region |
-| `npm run migrate:make` | Scaffold a new migration file |
-| `npm run migrate:all` | Run `migrate:latest` for **every** region in `REGIONS` (`CLUSTER=archive` for the archive cluster) |
-| `npm run partitions:create` | Pre-create the next N months of `orders` partitions (`MONTHS_AHEAD`, `REGION` env overrides) |
-
----
-
-## Project structure
-
-```
-order-service/
-├── .env.example              # template — copy to .env, never commit .env
-├── CLAUDE.md                  # conventions, layering rules, performance/sharding rules
-├── docs/                      # architecture, schema, API contracts, business logic, build plan
-├── scripts/
-│   ├── migrate-all.ts         # runs migrate:latest across every region (hot or archive cluster)
-│   └── create-partitions.ts   # pre-creates monthly `orders` partitions
-├── play/                      # gitignored local smoke-test scripts — not part of the app
-└── src/
-    ├── app.ts                 # express composition (cors, helmet, json, cookie, correlation, routes, errorHandler)
-    ├── server.ts               # HTTP API bootstrap: shard ping, WS attach, core-events consumer, graceful shutdown
-    ├── worker.ts                # background worker bootstrap: registers assignment/outbox/archival jobs, starts the cron scheduler
-    ├── routes.ts                # mounts every module router under /api
-    │
-    ├── app/                     # business modules — one folder per bounded context
-    │   ├── health/                # GET /api/health — pings every hot + archive shard
-    │   ├── order/                  # placement, lifecycle, status machine, customer/restaurant order lists
-    │   ├── payment/                 # Kashier online sessions, COD, webhook processing, the money ledger
-    │   ├── assignment/               # order → delivery-agent auto-assignment worker + manual/admin assign
-    │   ├── agent/                     # agent presence (Redis GEO), tasks, earnings, delivery settlement
-    │   └── finance/                    # restaurant running balance + payout recording
-    │
-    │   Each module follows the same skeleton: entity/ · dto/*.request.dto.ts ·
-    │   dto/*.response.dto.ts · repository/*.repo.ts (exported functions, not
-    │   classes) · service/*.service.ts (@injectable, business logic) ·
-    │   controller/*.controller.ts (@injectable, validate → service → DTO →
-    │   respond) · routes.ts · enums.ts · errors.ts · types.ts
-    │
-    ├── lib/                     # app-aware glue — may import pkg/ and env, never app/<module>/*
-    │   ├── auth/                  # JWT guard, RBAC middleware, restaurant/branch membership checks
-    │   ├── cache/                  # Redis client init + withCache(ttl) response-caching middleware
-    │   ├── config/env.ts            # zod-validated env — the single source of truth for all config
-    │   ├── core-client/             # sync HTTP client to core-service (branches, products, addresses, RBAC)
-    │   ├── core-events/              # inbound RabbitMQ consumer — core.events → cache invalidation
-    │   ├── correlation/               # X-Correlation-Id propagation
-    │   ├── di/                        # tsyringe container + TOKENS symbol registry
-    │   ├── error/                      # AppError + the central Express error handler
-    │   ├── events/                      # outbound transactional outbox (order.events) + its drain job
-    │   ├── http/                         # sendSuccess/sendPaginated + cursor-based pagination
-    │   ├── idempotency/                   # Idempotency-Key middleware (Redis + DB fallback)
-    │   ├── jobs/                           # generic cron job registry/scheduler + the archival worker
-    │   │   ├── job-registry.ts / job.types.ts / scheduler.ts   # generic "register a cron job" infra
-    │   │   ├── archival.worker.ts           # orchestrates one nightly archival run per region
-    │   │   ├── archival.helpers.ts          # the per-table batch-move loop + JSON-column handling
-    │   │   └── archival.types.ts            # ArchivalTableSpec / ArchivalRunResult types
-    │   ├── knex/                             # db(region) (hot) / dbArchive(region) (archive) connections
-    │   ├── logger/                            # structured JSON logger
-    │   ├── messaging/                          # AMQP connection lifecycle
-    │   ├── rbac/                                # read-through permission cache backed by core-service
-    │   ├── sharding/                             # region resolver (query > JWT > header) + region list
-    │   ├── validation/                            # validateBody(DTO, req.body)
-    │   └── websocket/                              # socket.io server, channel auth, Redis adapter wiring
-    │
-    ├── pkg/                     # framework- and app-agnostic — no imports from lib/ or app/, no env
-    │   ├── cache/                 # ICacheProvider interface + the ioredis implementation
-    │   ├── messaging/               # IMessageBroker interface + the amqplib/RabbitMQ client
-    │   ├── payments/                  # IPaymentProvider interface + the Kashier HTTP client
-    │   └── utils/                      # money.ts (minor-unit helpers), time.ts (date helpers), retry.ts
-    │
-    └── migrations/               # knex migrations — raw SQL in up()/down(), snake_case tables/columns
-```
-
-See [`docs/folder-structure.md`](./docs/folder-structure.md) for the fully annotated version and the `pkg → lib → app` layering rules, and [`CLAUDE.md`](./CLAUDE.md) §3–§5 for the naming/module conventions every new file follows.
-
----
-
-## Environment variables
-
-The full, current list — with inline comments explaining each one — lives in [`.env.example`](./.env.example). A few patterns worth knowing:
-
-- **Per-region shard config** is dynamic, not fixed keys in the schema: for every code in `REGIONS`, the app expects `DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (hot) and `ARCHIVE_DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (archive). Add a region to `REGIONS` and its two DB blocks, and it's live.
-- **Region is never in the JWT.** It's resolved per-request from `?region=` query, then `X-Region` header, then a `region` cookie. `all` is preserved for specific admin fan-out reads; writes always resolve to one concrete region.
-- Everything is validated by `zod` in `src/lib/config/env.ts` at process boot — a missing required var fails fast with a clear error instead of an obscure runtime crash later.
-
----
-
-## Further reading
+## Further Reading
 
 | Doc | Purpose |
 | --- | --- |
 | [`CLAUDE.md`](./CLAUDE.md) | The full conventions doc: layering rules, naming, response DTOs, performance/indexing rules, what's out of scope. |
 | [`docs/README.md`](./docs/README.md) | Reading order for the rest of the docs. |
-| [`docs/system-design.md`](./docs/system-design.md) | Architecture: regions, Redis layers, sync/async with core, Kashier, WebSocket. |
+| [`docs/system-design.md`](./docs/system-design.md) | Architecture rationale: regions, Redis layers, sync/async with core, Kashier, WebSocket. |
 | [`docs/database-design.md`](./docs/database-design.md) | Full schema, FKs, indexes (each justified), sharding plan. |
 | [`docs/api-contracts.md`](./docs/api-contracts.md) | Every endpoint's request/response DTOs and error codes. |
 | [`docs/business-logic/`](./docs/business-logic) | One file per module: lifecycle, invariants, RBAC. |
 | [`docs/implementation-plan.md`](./docs/implementation-plan.md) | The phased build order this service was actually built in. |
 
-> Some of the `docs/` files describe the original design (written before/during implementation) and drift from the shipped code in a few small places — e.g. a standalone `POST /payments/init` was planned but the shipped flow folds it into order placement instead, and refunds are designed but not yet built. This README describes what's actually implemented; treat `docs/` as the design rationale, and the code (or this file) as the source of truth for current behavior.
+Some `docs/` files describe the original design (written before/during implementation) and drift from the shipped code in a couple of small, already-noted places (standalone payment-init, refunds). Treat `docs/` as design rationale, and this README (or the code itself) as the source of truth for current behavior.
 
 ## Testing
 
-There's no automated test suite yet. `play/` holds gitignored, throwaway scripts used to manually verify behavior against a real running stack (Postgres/Redis/RabbitMQ/core-service) — see [`play/README.md`](./play/README.md) for what each one checks. They're a reference for how to exercise the service directly, not something to run in CI.
+There's no automated test suite, test runner dependency, or lint configuration in this repository yet — `package.json` defines no `test` or `lint` script. `play/` holds gitignored, throwaway scripts used to manually verify behavior against a real running stack (Postgres/Redis/RabbitMQ/core-service) — see [`play/README.md`](./play/README.md) for what each one checks. They're a reference for how to exercise the service directly, not something wired into CI.
+
+No `LICENSE` file exists in this repository, so no license is stated here.
