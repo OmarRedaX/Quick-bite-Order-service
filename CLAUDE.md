@@ -164,6 +164,19 @@ This applies to:
 
 Exception: tiny one-shot tuple types used in a single function body (e.g. `[number, number][]`) are fine inline.
 
+### Inline helper functions — **forbidden**
+
+Free-standing helper functions (not the file's primary exported class/handler) do **not** live at module scope in a service, controller, repository, client, handler, middleware, or worker file. Extract them to:
+- **`pkg/utils/<name>.ts`** when the helper is generic and framework/app-agnostic (date math, money math, string formatting) — reusable outside this one call site in principle, even if only one caller exists today.
+- **`<file-base>.helpers.ts`** next to the file that needs it, when the helper is specific to that module/worker's own logic and not generic enough for `pkg/utils/` (e.g. `archival.helpers.ts` beside `archival.worker.ts`).
+
+A file should read as its primary responsibility (the service's public methods, the worker's orchestration loop) with supporting logic one import away, not interleaved with it.
+
+Exceptions:
+- A single-expression helper used once inline (e.g. `const dbColumn = (s: string) => s.replace(...)`) is fine — same spirit as the tuple-type exception above.
+- Controller methods as arrow-function properties (§5.6) are the file's primary handlers, not helpers — they stay put.
+- Private class methods (`private assertReadAccess(...)`) are not free-standing functions and are unaffected by this rule.
+
 ### Throwaway / experimental scripts → `play/`
 
 Anything that's a one-shot script, scratch file, manual smoke-test runner, log dump, or debug artifact — put it under `play/` at the repo root. `play/` is gitignored. **Never** commit ad-hoc `test-*.ts` / `debug-*.ts` files at the repo root or under `src/`. Real automated tests (when we add them) go in `tests/`.
