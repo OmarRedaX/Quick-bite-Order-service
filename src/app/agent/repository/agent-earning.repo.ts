@@ -2,7 +2,7 @@ import {Knex} from "knex";
 import {AgentEarningEntity} from "../entity/agent-earning.entity";
 import {InsertAgentEarningInput, EarningsRange} from "../types";
 
-const AGENT_EARNING_COLUMNS = [
+export const AGENT_EARNING_COLUMNS = [
     "id",
     "region",
     "agent_id",

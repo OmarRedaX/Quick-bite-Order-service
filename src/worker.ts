@@ -11,6 +11,7 @@ import {startAll, stopAll} from "./lib/jobs/scheduler";
 import {registerOrderModuleCoreEventHandlers} from "./app/order/core-events.handlers";
 import {registerAssignmentJobs} from "./app/assignment/jobs";
 import {registerOutboxDrainJobs} from "./lib/events/jobs";
+import {registerArchivalJobs} from "./lib/jobs/archival.worker";
 
 /**
  * Background worker process. All it does is boot the shared infra and hand
@@ -28,8 +29,8 @@ container.registerInstance(TOKENS.WsServer, io);
 // ── Job registrations ───────────────────────────────────────────────────
 registerAssignmentJobs();
 registerOutboxDrainJobs();
-// registerOrderArchiveJobs
-// (Future jobs land here: payouts sweep, archival, presence GC, etc.)
+registerArchivalJobs();
+// (Future jobs land here: payouts sweep, presence GC, etc.)
 
 async function main() {
     noopServer.listen(0);

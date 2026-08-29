@@ -14,3 +14,11 @@ export function toMs(value: number, unit: TimeUnit): number {
 export function toSeconds(value: number, unit: TimeUnit): number {
     return toMs(value, unit) / 1000;
 }
+
+export function currentUtcYear(): number {
+    return new Date().getUTCFullYear();
+}
+
+export function startOfUtcYear(year: number): Date {
+    return new Date(Date.UTC(year, 0, 1));
+}

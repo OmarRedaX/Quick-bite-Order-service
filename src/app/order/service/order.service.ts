@@ -3,13 +3,14 @@ import {injectable, inject} from "tsyringe";
 import {Server as IoServer} from "socket.io";
 import {container} from "../../../lib/di/container";
 import {TOKENS} from "../../../lib/di/tokens";
-import {db} from "../../../lib/knex/knex";
+import {db, dbArchive} from "../../../lib/knex/knex";
 import {assertRegion} from "../../../lib/sharding/regions";
 import {ICacheProvider} from "../../../pkg/cache/cache.interface";
 import {logger} from "../../../lib/logger/logger";
 import {UnAuthorisedError} from "../../../lib/auth/errors";
 import {sumMinor, multiplyMinor} from "../../../pkg/utils/money";
-import {PaginationParams, FilterParams} from "../../../lib/http/pagination/cursor-pagination";
+import {PaginationParams, FilterParams, buildPaginationResult} from "../../../lib/http/pagination/cursor-pagination";
+import {currentUtcYear, startOfUtcYear} from "../../../pkg/utils/time";
 import {
     getBranch,
     getBranchProducts,
@@ -223,8 +224,16 @@ export class OrderService {
     }
 
     async getOrder(actor: ActorContext, region: string, publicId: string): Promise<OrderDetailResponseDTO> {
-        const conn = db(region);
-        const order = await findOrderByPublicId(publicId, conn);
+        let conn = db(region);
+        let order = await findOrderByPublicId(publicId, conn);
+
+        // Prior-year orders live on the archive cluster. Only retry there for
+        // admin / restaurant-owner lookups — customer order-tracking stays off
+        // the archive round-trip entirely.
+        if (!order && this.canReadArchive(actor)) {
+            conn = dbArchive(region);
+            order = await findOrderByPublicId(publicId, conn);
+        }
         if (!order) throw OrderNotFoundError;
 
         this.assertReadAccess(actor, order);
@@ -236,7 +245,9 @@ export class OrderService {
     async listCustomerOrders(actor: ActorContext, region: string, year: number, pagination: PaginationParams) {
         const yearStart = new Date(Date.UTC(year, 0, 1));
         const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
-        const conn = db(region);
+        // A `year` filter always falls entirely on one side of the archive
+        // boundary (it can never straddle it), so a single-source read is safe.
+        const conn = year < currentUtcYear() ? dbArchive(region) : db(region);
         const result = await findOrdersByCustomer({customerId: actor.userId, yearStart, yearEnd}, pagination, conn);
         const counts = await countItemsByOrderIds(result.data.map((o) => o.id), conn);
         return {
@@ -256,17 +267,66 @@ export class OrderService {
         filters: FilterParams[],
         pagination: PaginationParams,
     ) {
-        const conn = db(region);
-        const result = await findOrdersByRestaurantBranch(
-            {restaurantId, branchId, status, from, to},
-            pagination,
-            filters,
-            conn,
+        const yearStart = startOfUtcYear(currentUtcYear());
+        const archiveOnly = !!to && to <= yearStart;
+        // An unbounded `from` intentionally stays hot-only, matching the
+        // pre-archival default of "recent orders" rather than fanning out to
+        // archive on every unfiltered list call — callers wanting history
+        // must pass an explicit `from`.
+        const hotOnly = !archiveOnly && (!from || from >= yearStart);
+
+        if (hotOnly || archiveOnly) {
+            const conn = archiveOnly ? dbArchive(region) : db(region);
+            const result = await findOrdersByRestaurantBranch({restaurantId, branchId, status, from, to}, pagination, filters, conn);
+            const counts = await countItemsByOrderIds(result.data.map((o) => o.id), conn);
+            return {
+                data: result.data.map((o) => OrderSummaryResponseDTO.from(o, counts.get(o.id) ?? 0)),
+                meta: result.meta,
+            };
+        }
+
+        // Range straddles the archive/hot boundary (from < this year <= to, or
+        // to unset). Rare — fan out to both clusters and merge in memory.
+        // Pagination past the first page is best-effort: a single cursor can't
+        // describe a position across two independently-paginated sources.
+        return this.listRestaurantOrdersAcrossClusters(region, restaurantId, branchId, status, from, to, yearStart, filters, pagination);
+    }
+
+    private async listRestaurantOrdersAcrossClusters(
+        region: string,
+        restaurantId: number,
+        branchId: number,
+        status: OrderStatus | undefined,
+        from: Date | undefined,
+        to: Date | undefined,
+        yearStart: Date,
+        filters: FilterParams[],
+        pagination: PaginationParams,
+    ) {
+        const hotConn = db(region);
+        const archiveConn = dbArchive(region);
+        const [hotResult, archiveResult] = await Promise.all([
+            findOrdersByRestaurantBranch({restaurantId, branchId, status, from: yearStart, to}, pagination, filters, hotConn),
+            findOrdersByRestaurantBranch({restaurantId, branchId, status, from, to: yearStart}, pagination, filters, archiveConn),
+        ]);
+
+        const merged = [...hotResult.data, ...archiveResult.data].sort((a, b) =>
+            pagination.sortOrder === "asc"
+                ? a.createdAt.getTime() - b.createdAt.getTime()
+                : b.createdAt.getTime() - a.createdAt.getTime(),
         );
-        const counts = await countItemsByOrderIds(result.data.map((o) => o.id), conn);
+        const {data, meta} = buildPaginationResult(merged, pagination.limit, pagination.sortBy);
+
+        const hotIds = new Set(hotResult.data.map((o) => o.id));
+        const [hotCounts, archiveCounts] = await Promise.all([
+            countItemsByOrderIds(data.filter((o) => hotIds.has(o.id)).map((o) => o.id), hotConn),
+            countItemsByOrderIds(data.filter((o) => !hotIds.has(o.id)).map((o) => o.id), archiveConn),
+        ]);
+        const counts = new Map([...hotCounts, ...archiveCounts]);
+
         return {
-            data: result.data.map((o) => OrderSummaryResponseDTO.from(o, counts.get(o.id) ?? 0)),
-            meta: result.meta,
+            data: data.map((o) => OrderSummaryResponseDTO.from(o, counts.get(o.id) ?? 0)),
+            meta,
         };
     }
 
@@ -366,6 +426,10 @@ export class OrderService {
                 error: (err as Error).message,
             });
         }
+    }
+
+    private canReadArchive(actor: ActorContext): boolean {
+        return actor.role === "system_admin" || (actor.role === "restaurant_user" && actor.restaurantRole === "owner");
     }
 
     private assertReadAccess(actor: ActorContext, order: OrderEntity) {

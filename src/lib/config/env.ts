@@ -68,6 +68,12 @@ const baseSchema = z.object({
     ASSIGNMENT_MAX_ATTEMPTS: z.string().default("3"),
     ASSIGNMENT_BATCH: z.string().default("20"),                          // ready orders processed per tick
     AGENT_EARNING_SHARE_BPS: z.string().default("8000"),                 // 80% of order.delivery_fee
+
+    // Cold archival worker
+    ARCHIVAL_CRON: z.string().default("0 3 * * *"),                      // nightly at 03:00
+    ARCHIVAL_TIMEZONE: z.string().default("UTC"),
+    ARCHIVAL_BATCH_SIZE: z.string().default("1000"),
+    ARCHIVAL_MAX_RUNTIME_MIN: z.string().default("60"),
 });
 
 const parsed = baseSchema.parse(process.env);
@@ -213,5 +219,12 @@ export const env = {
         maxAttempts: Number(parsed.ASSIGNMENT_MAX_ATTEMPTS),
         batch: Number(parsed.ASSIGNMENT_BATCH),
         agentEarningShareBps: Number(parsed.AGENT_EARNING_SHARE_BPS),
+    },
+
+    archival: {
+        cron: parsed.ARCHIVAL_CRON,
+        timezone: parsed.ARCHIVAL_TIMEZONE,
+        batchSize: Number(parsed.ARCHIVAL_BATCH_SIZE),
+        maxRuntimeMin: Number(parsed.ARCHIVAL_MAX_RUNTIME_MIN),
     },
 };
