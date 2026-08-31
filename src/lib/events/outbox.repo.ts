@@ -50,8 +50,13 @@ export async function claimBatch(conn: Knex, limit: number): Promise<OutboxRow[]
     return rows as OutboxRow[];
 }
 
-export async function markDispatched(conn: Knex, id: string): Promise<void> {
-    await conn("events_outbox").where({id}).update({dispatched_at: new Date()});
+/**
+ * Marks every row that published successfully in one drain pass with a
+ * single UPDATE (whereIn), instead of one round-trip per row.
+ */
+export async function markDispatchedBatch(conn: Knex, ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    await conn("events_outbox").whereIn("id", ids).update({dispatched_at: new Date()});
 }
 
 export async function markFailed(conn: Knex, id: string, err: string): Promise<void> {

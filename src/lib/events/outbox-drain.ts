@@ -2,7 +2,7 @@ import {db} from "../knex/knex";
 import {env} from "../config/env";
 import {logger} from "../logger/logger";
 import {messageBroker} from "../messaging/init";
-import {claimBatch, markDispatched, markFailed} from "./outbox.repo";
+import {claimBatch, markDispatchedBatch, markFailed} from "./outbox.repo";
 
 /**
  * One pass over a single region's outbox: claim a batch with FOR UPDATE
@@ -24,6 +24,7 @@ export async function drainOutboxForRegion(region: string): Promise<void> {
             return;
         }
 
+        const dispatchedIds: string[] = [];
         for (const row of rows) {
             const envelope = {
                 eventId: row.event_id,
@@ -40,7 +41,7 @@ export async function drainOutboxForRegion(region: string): Promise<void> {
                     row.event_type,
                     Buffer.from(JSON.stringify(envelope), "utf8"),
                 );
-                await markDispatched(trx, row.id);
+                dispatchedIds.push(row.id);
             } catch (err) {
                 const msg = describeError(err);
                 await markFailed(trx, row.id, msg);
@@ -49,6 +50,7 @@ export async function drainOutboxForRegion(region: string): Promise<void> {
             }
         }
 
+        await markDispatchedBatch(trx, dispatchedIds);
         await trx.commit();
     } catch (err) {
         await trx.rollback();
