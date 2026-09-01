@@ -43,7 +43,7 @@ Read directly from `package.json` and the code that uses each dependency.
 | IDs | `uuid` | client-facing order ids (`public_id`) |
 | Misc | `helmet`, `cors`, `cookie-parser`, `dotenv` | standard Express hardening/config middleware |
 
-Dev tooling: `typescript`, `tsx` (dev/watch runner), `ts-node` (used by the Knex CLI). There is no test runner dependency (no `jest`/`vitest`/`mocha`) and no lint config in `package.json` — see [Testing](#testing).
+Dev tooling: `typescript`, `tsx` (dev/watch runner), `ts-node` (used by the Knex CLI), `vitest` (test runner). No lint config in `package.json` — see [Testing](#testing).
 
 ---
 
@@ -488,8 +488,11 @@ OUTBOUND_EVENTS_BATCH_SIZE=100
 # core-service — this service's sync HTTP dependency for users/restaurants/
 # branches/products/RBAC. CORE_INTERNAL_API_KEY must match the value
 # core-service expects on the `api-key` header for internal routes.
+# CORE_HTTP_TIMEOUT_MS bounds each individual attempt at reaching it — see
+# the core-service-unavailable pattern below.
 CORE_SERVICE_BASE_URL=http://localhost:3000
 CORE_INTERNAL_API_KEY=replace-with-core-services-internal-api-key
+CORE_HTTP_TIMEOUT_MS=5000
 
 WS_HEARTBEAT_SEC=30
 
@@ -536,6 +539,7 @@ A couple of patterns worth knowing:
 
 - **Per-region shard config is dynamic**, not fixed keys in the zod schema: for every code in `REGIONS`, the app expects `DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (hot) and `ARCHIVE_DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (archive). Add a region to `REGIONS` and its two DB blocks, and it's live — no code change.
 - **Region is never in the JWT.** It's resolved per request from `?region=` query, then the `X-Region` header, then a `region` cookie.
+- **core-service unavailable is one stable, documented contract**: `503 { "error": "Core service unavailable" }`. It covers every way a core-service call can fail to get a good answer — connection refused, DNS failure, a request that runs past `CORE_HTTP_TIMEOUT_MS`, and core-service itself responding with a 5xx — all translated at the `core-client` boundary (`src/lib/core-client/core-client.ts`), never leaked as a raw network exception. Up to 3 attempts, 50ms→100ms backoff, and only that specific failure is retried — a real 4xx from core-service (`src/lib/core-client/errors.ts`'s `coreUpstreamError`) is returned as-is, not retried, not folded into 503.
 
 ---
 
@@ -723,6 +727,6 @@ Some `docs/` files describe the original design (written before/during implement
 
 ## Testing
 
-There's no automated test suite, test runner dependency, or lint configuration in this repository yet — `package.json` defines no `test` or `lint` script. `play/` holds gitignored, throwaway scripts used to manually verify behavior against a real running stack (Postgres/Redis/RabbitMQ/core-service) — see [`play/README.md`](./play/README.md) for what each one checks. They're a reference for how to exercise the service directly, not something wired into CI.
+`npm test` runs [`vitest`](https://vitest.dev) against `tests/` — currently just `tests/core-client.test.ts`, covering the core-service-unavailable contract described above (success, a real 4xx, 5xx→503, connection-refused→503, timeout→503, retry-then-recover, and that an unrelated/programming error is neither retried nor folded into 503). No lint configuration exists in `package.json` yet. `play/` holds gitignored, throwaway scripts used to manually verify behavior against a real running stack (Postgres/Redis/RabbitMQ/core-service) — see [`play/README.md`](./play/README.md) for what each one checks. They're a reference for how to exercise the service directly, not something wired into CI.
 
 No `LICENSE` file exists in this repository, so no license is stated here.

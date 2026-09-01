@@ -43,6 +43,9 @@ const baseSchema = z.object({
 
     CORE_SERVICE_BASE_URL: z.string(),
     CORE_INTERNAL_API_KEY: z.string(),
+    // Matches analytics-service's CORE_HTTP_TIMEOUT_MS naming for the same
+    // "how long to wait on core-service before giving up" knob.
+    CORE_HTTP_TIMEOUT_MS: z.string().default("5000"),
 
     WS_HEARTBEAT_SEC: z.string().default("30"),
 
@@ -181,6 +184,7 @@ export const env = {
     core: {
         baseUrl: parsed.CORE_SERVICE_BASE_URL,
         internalApiKey: parsed.CORE_INTERNAL_API_KEY,
+        httpTimeoutMs: Number(parsed.CORE_HTTP_TIMEOUT_MS),
     },
 
     ws: {

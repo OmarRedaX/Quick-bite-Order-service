@@ -1,11 +1,15 @@
 import {env} from "../config/env";
 import {AppError} from "../error/AppError";
 import {retry} from "../../pkg/utils/retry";
-import {coreUnavailableError, coreUpstreamError} from "./errors";
+import {coreServiceUnavailableError, coreUpstreamError} from "./errors";
 import {CoreClientRequest} from "./types";
 
 export class CoreClient {
-    constructor(private readonly baseUrl: string, private readonly apiKey: string) {}
+    constructor(
+        private readonly baseUrl: string,
+        private readonly apiKey: string,
+        private readonly timeoutMs: number,
+    ) {}
 
     async request<T>(req: CoreClientRequest): Promise<T> {
         const url = new URL(req.path, this.baseUrl);
@@ -19,12 +23,28 @@ export class CoreClient {
 
         return retry(
             async () => {
-                const res = await fetch(url, {
-                    method: req.method,
-                    headers,
-                    body: req.body ? JSON.stringify(req.body) : undefined,
-                });
-                if (res.status >= 500) throw coreUnavailableError(res.status);
+                let res: Response;
+                try {
+                    // AbortSignal.timeout makes fetch() itself reject once the
+                    // timeout fires — same catch block as connection-refused/DNS
+                    // failures below, so a hung core-service degrades exactly
+                    // the same documented way as a fully-down one.
+                    res = await fetch(url, {
+                        method: req.method,
+                        headers,
+                        body: req.body ? JSON.stringify(req.body) : undefined,
+                        signal: AbortSignal.timeout(this.timeoutMs),
+                    });
+                } catch (cause) {
+                    // Anything fetch() itself throws — connection refused, DNS
+                    // failure, or the timeout above firing — means core-service
+                    // couldn't be reached at all, not that it answered badly.
+                    // Translate it at this boundary into the same stable,
+                    // documented contract as a 5xx response, never let the raw
+                    // transport exception escape past this client.
+                    throw coreServiceUnavailableError(cause);
+                }
+                if (res.status >= 500) throw coreServiceUnavailableError(new Error(`core-service responded ${res.status}`));
                 if (!res.ok) throw coreUpstreamError(res.status, await res.text().catch(() => ""));
                 if (res.status === 204) return undefined as T;
                 return (await res.json()) as T;
@@ -33,10 +53,17 @@ export class CoreClient {
                 attempts: 3,
                 initialDelayMs: 50,
                 maxDelayMs: 500,
-                isRetryable: (err) => !(err instanceof AppError) || err.statusCode === 503,
+                // Only retry the availability failure this client itself
+                // classifies as such (503, thrown exclusively by
+                // coreServiceUnavailableError above) — never an arbitrary
+                // AppError (e.g. a real 4xx from coreUpstreamError) and never
+                // an unrelated/programming error (e.g. a JSON.parse throw from
+                // a malformed response body), which should fail fast and
+                // surface as-is instead of being retried blind.
+                isRetryable: (err) => err instanceof AppError && err.statusCode === 503,
             },
         );
     }
 }
 
-export const coreClient = new CoreClient(env.core.baseUrl, env.core.internalApiKey);
+export const coreClient = new CoreClient(env.core.baseUrl, env.core.internalApiKey, env.core.httpTimeoutMs);
