@@ -113,7 +113,6 @@ Excludes `node_modules/`, `dist/` (build output, gitignored), and `.git/`. There
 ```
 order-service/
 ├── .env.example              # template for .env — every var this service reads, with placeholders
-├── CLAUDE.md                  # coding conventions & layering rules this codebase follows
 ├── package.json / package-lock.json
 ├── tsconfig.json
 ├── docs/                      # design docs — architecture, schema, API contracts, business logic, build plan
@@ -179,7 +178,7 @@ order-service/
     └── migrations/               # knex migrations — raw SQL inside up()/down(), snake_case tables/columns
 ```
 
-See [`docs/folder-structure.md`](./docs/folder-structure.md) for the (partially aspirational — some module names there differ from what actually shipped) fully annotated version, and [`CLAUDE.md`](./CLAUDE.md) §3–§5 for the naming/module conventions every file follows.
+See [`docs/folder-structure.md`](./docs/folder-structure.md) for the (partially aspirational — some module names there differ from what actually shipped) fully annotated version.
 
 ---
 
@@ -723,7 +722,6 @@ Full payload shapes: [`docs/business-logic/orders.md`](./docs/business-logic/ord
 
 | Doc | Purpose |
 | --- | --- |
-| [`CLAUDE.md`](./CLAUDE.md) | The full conventions doc: layering rules, naming, response DTOs, performance/indexing rules, what's out of scope. |
 | [`docs/README.md`](./docs/README.md) | Reading order for the rest of the docs. |
 | [`docs/system-design.md`](./docs/system-design.md) | Architecture rationale: regions, Redis layers, sync/async with core, Kashier, WebSocket. |
 | [`docs/database-design.md`](./docs/database-design.md) | Full schema, FKs, indexes (each justified), sharding plan. |

@@ -9,3 +9,6 @@ dist/
 
 # local experimentation scripts — not tracked
 play/
+
+# internal coding conventions — not for the public repo
+CLAUDE.md
