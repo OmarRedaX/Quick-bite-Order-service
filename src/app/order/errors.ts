@@ -5,6 +5,7 @@ export const BranchNotAcceptingOrdersError = new AppError("BranchNotAcceptingOrd
 export const CancellationWindowExpiredError = new AppError("CancellationWindowExpired", 409);
 export const ReasonRequiredError = new AppError("Reason required for this transition", 400);
 export const OnlinePaymentNotAvailableError = new AppError("OnlinePaymentNotAvailableInRegion", 409);
+export const InvalidBackfillYearError = new AppError("InvalidBackfillYear: year query param must be a whole number, e.g. ?year=2025", 400);
 
 export function invalidStatusTransitionError(from: string, to: string) {
     return new AppError(

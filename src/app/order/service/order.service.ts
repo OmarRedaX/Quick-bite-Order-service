@@ -21,6 +21,7 @@ import {CoreBranchProduct} from "../../../lib/core-client/types";
 import {getCustomerAddress, flattenAddress} from "../../../lib/core-client/address.client";
 import {CoreDataCacheService} from "./core-data-cache.service";
 import {PaymentService} from "../../payment/service/payment.service";
+import {PermissionCacheService} from "../../../lib/rbac/permission-cache.service";
 import {assertTransition} from "./order-status.service";
 import {OrderEntity} from "../entity/order.entity";
 import {OrderItemEntity} from "../entity/order-item.entity";
@@ -38,6 +39,7 @@ import {
     OrderDetailResponseDTO,
     OrderSummaryResponseDTO,
     OrderStatusResponseDTO,
+    OrderHistoryResponseDTO,
 } from "../dto/order.response.dto";
 import {CreateOrderRequestDTO, UpdateOrderStatusRequestDTO} from "../dto/order.request.dto";
 import {
@@ -46,6 +48,7 @@ import {
     updateOrderStatus,
     findOrdersByCustomer,
     findOrdersByRestaurantBranch,
+    findOrdersForBackfill,
 } from "../repository/order.repo";
 import {
     bulkInsertItems,
@@ -66,6 +69,7 @@ export class OrderService {
         @inject(TOKENS.CacheProvider) private readonly cache: ICacheProvider,
         @inject(TOKENS.CoreDataCacheService) private readonly coreData: CoreDataCacheService,
         @inject(TOKENS.PaymentService) private readonly paymentService: PaymentService,
+        @inject(TOKENS.PermissionCacheService) private readonly permissionCache: PermissionCacheService,
     ) {}
 
     // Lazy access — WsServer is registered after the DI container builds the
@@ -330,12 +334,43 @@ export class OrderService {
         };
     }
 
+    /**
+     * Internal, service-to-service export for analytics-service's backfill
+     * command — every order that reached `placed` or later in one
+     * (region, year), paginated. A `year` filter never straddles the
+     * hot/archive boundary (same reasoning as listCustomerOrders above), so a
+     * single-source read is safe; the caller pages one year at a time.
+     */
+    async listOrdersForBackfill(region: string, year: number, pagination: PaginationParams) {
+        const yearStart = new Date(Date.UTC(year, 0, 1));
+        const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
+        const conn = year < currentUtcYear() ? dbArchive(region) : db(region);
+
+        const result = await findOrdersForBackfill(yearStart, yearEnd, pagination, conn);
+        const items = await findItemsByOrderIds(result.data.map((o) => o.id), conn);
+
+        const itemsByOrderId = new Map<number, OrderItemEntity[]>();
+        for (const item of items) {
+            const list = itemsByOrderId.get(item.orderId) ?? [];
+            list.push(item);
+            itemsByOrderId.set(item.orderId, list);
+        }
+
+        return {
+            data: result.data.map((o) => OrderHistoryResponseDTO.from(o, itemsByOrderId.get(o.id) ?? [])),
+            meta: result.meta,
+        };
+    }
+
     async updateStatus(actor: ActorContext, region: string, publicId: string, body: UpdateOrderStatusRequestDTO): Promise<OrderStatusResponseDTO> {
         const conn = db(region);
         const order = await findOrderByPublicId(publicId, conn);
         if (!order) throw OrderNotFoundError;
 
         const statusActor = this.resolveStatusActor(actor, order);
+        if (statusActor === StatusActor.RESTAURANT_MEMBER) {
+            await this.assertRestaurantMemberPermission(actor, body.status);
+        }
         const {stamp} = assertTransition(order.status, body.status, {
             actor: statusActor,
             reason: body.reason,
@@ -460,6 +495,25 @@ export class OrderService {
         throw UnAuthorisedError;
     }
 
+    /**
+     * A RESTAURANT_MEMBER actor passing resolveStatusActor only proves
+     * "this user belongs to the restaurant/branch" — it says nothing about
+     * their restaurantRole's permissions. assertTransition's actor-class
+     * check treats every restaurant member alike, so without this, staff
+     * (seeded with `orders:accept` only) could also reject/cancel orders,
+     * which the permission catalog never grants them. Maps the transition
+     * target to the matching `orders:*` permission and checks it the same
+     * way rbac() does elsewhere — system_admin never reaches here (it
+     * resolves to StatusActor.ADMIN above, not RESTAURANT_MEMBER).
+     */
+    private async assertRestaurantMemberPermission(actor: ActorContext, targetStatus: OrderStatus): Promise<void> {
+        const action = ORDER_STATUS_PERMISSION_ACTION[targetStatus] ?? "update";
+        const permissions = await this.permissionCache.getPermissions(actor.restaurantRole!);
+        if (!this.permissionCache.hasPermission(permissions, "orders", action)) {
+            throw UnAuthorisedError;
+        }
+    }
+
     private async invalidateBranchOrdersCache(region: string, branchId: number) {
         try {
             await this.cache.del(RESTAURANT_ORDERS_CACHE_PREFIX(region, branchId));
@@ -475,6 +529,17 @@ const OUTBOX_EVENT_FOR_STATUS: Partial<Record<OrderStatus, string>> = {
     [OrderStatus.ACCEPTED]: EVENT_TYPES.ORDER_ACCEPTED,
     [OrderStatus.REJECTED]: EVENT_TYPES.ORDER_REJECTED,
     [OrderStatus.CANCELLED]: EVENT_TYPES.ORDER_CANCELLED,
+};
+
+// The `orders:*` permission a RESTAURANT_MEMBER needs to drive this
+// transition — see assertRestaurantMemberPermission. Any target not listed
+// here (the in-flight PREPARING/READY progression) falls back to
+// `orders:update`, matching what the permission catalog already names that
+// action for.
+const ORDER_STATUS_PERMISSION_ACTION: Partial<Record<OrderStatus, string>> = {
+    [OrderStatus.ACCEPTED]: "accept",
+    [OrderStatus.REJECTED]: "reject",
+    [OrderStatus.CANCELLED]: "cancel",
 };
 
 /** Matches analytics-service contract (docs/api-contracts.md — order.placed payload). */

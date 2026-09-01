@@ -1,6 +1,6 @@
 import {Router} from "express";
 import {authenticate} from "../../lib/auth/guard";
-import {rbac, requireRestaurantMember} from "../../lib/auth/rbac";
+import {rbac, requireRestaurantMember, requireSystemAdmin} from "../../lib/auth/rbac";
 import {requireRegion} from "../../lib/sharding/region-resolver";
 import {idempotency} from "../../lib/idempotency/idempotency";
 import {container} from "../../lib/di/container";
@@ -31,13 +31,17 @@ financeRouter.get(
     ctrl.listPayouts,
 );
 
-// Admin-only write. requireRestaurantMember would block non-admins anyway, but
-// rbac covers admin bypass + future operator role.
+// Admin-only write, enforced by role — not the permission catalog.
+// `finance:payout_create` is seeded for `owner` too (owner gets every
+// seeded permission), so `rbac({resource:"finance", action:"payout_create"})`
+// alone would let a restaurant owner create payouts on their own
+// restaurant, contradicting the "admin-only" intent below. requireSystemAdmin
+// is a hard role check with no catalog involved.
 financeRouter.post(
     "/admin/restaurants/:restaurantId/payouts",
     authenticate,
     requireRegion,
-    rbac({resource: "finance", action: "payout_create"}),
+    requireSystemAdmin,
     idempotency({strict: true}),
     ctrl.createPayout,
 );

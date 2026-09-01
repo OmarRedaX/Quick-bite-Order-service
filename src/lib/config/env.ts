@@ -47,6 +47,11 @@ const baseSchema = z.object({
     // "how long to wait on core-service before giving up" knob.
     CORE_HTTP_TIMEOUT_MS: z.string().default("5000"),
 
+    // This service's own internal-api-key secret, guarding GET /api/internal/...
+    // routes (today: /internal/orders/history, read by analytics-service's
+    // backfill command). Empty by default -> requireInternalApiKey 500s until set.
+    INTERNAL_API_KEY: z.string().default(""),
+
     WS_HEARTBEAT_SEC: z.string().default("30"),
 
     KASHIER_BASE_URL: z.string().default("https://test-api.kashier.io"),
@@ -185,6 +190,10 @@ export const env = {
         baseUrl: parsed.CORE_SERVICE_BASE_URL,
         internalApiKey: parsed.CORE_INTERNAL_API_KEY,
         httpTimeoutMs: Number(parsed.CORE_HTTP_TIMEOUT_MS),
+    },
+
+    internal: {
+        apiKey: parsed.INTERNAL_API_KEY,
     },
 
     ws: {

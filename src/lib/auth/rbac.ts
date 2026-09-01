@@ -19,6 +19,24 @@ export function requireAgent(req: Request, res: Response, next: NextFunction) {
     next();
 }
 
+/**
+ * Gate routes that may only be called by `system_admin` — a hard role
+ * check, not a permission-catalog lookup. Use this instead of
+ * `rbac({resource, action})` for a route that's genuinely meant to be
+ * platform-admin-only: `rbac()`'s catalog check can't express "admin only"
+ * on its own, because any permission a `restaurant_user` role happens to
+ * hold (e.g. `owner`'s blanket grant of every seeded permission) still
+ * passes it. `finance:payout_create` is a real example — it's seeded for
+ * `owner` too, so `rbac({resource:"finance", action:"payout_create"})`
+ * alone lets a restaurant owner create payouts on their own restaurant,
+ * which contradicts this route's "admin-only" intent.
+ */
+export function requireSystemAdmin(req: Request, res: Response, next: NextFunction) {
+    if (!req.user) return res.status(401).json({error: "User not authenticated"});
+    if (req.user.role !== SYSTEM_ADMIN) return res.status(403).json({error: "system_admin role required"});
+    next();
+}
+
 export interface RBACOptions {
     resource: string;
     action: string;

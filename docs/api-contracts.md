@@ -618,7 +618,34 @@ No auth. Returns 200 `OK` if DB ping succeeds, 500 otherwise. Mirrors core-servi
 
 ## 8. Internal endpoints (not for clients)
 
-This service exposes **no** internal HTTP endpoints for inter-service traffic.
+### 8.1 GET /api/internal/orders/history
+
+Service-to-service only — guarded by `requireInternalApiKey` (header `api-key: <INTERNAL_API_KEY>`), no user JWT. Feeds `analytics-service`'s backfill command (`cmd/backfill-aggs`), which replays historical orders through the exact same aggregation path a live `order.placed` event takes, one `(region, year)` page at a time.
+
+Query params: `region` (required, one of `REGIONS`), `year` (required, integer — a single calendar year; never straddles the hot/archive boundary, so this endpoint always reads one source), `cursor`/`limit`/`sortBy=createdAt`/`sortOrder` (standard cursor pagination, see §0).
+
+Only orders that reached `placed` or later are returned — `pending_payment` orders never fired `order.placed` live, so including them here would fabricate revenue the live consumer never counted.
+
+```jsonc
+// GET /api/internal/orders/history?region=eg&year=2025&limit=100
+{
+  "success": true,
+  "data": [
+    {
+      "orderId": "<publicId>",
+      "restaurantId": 42,
+      "branchId": 7,
+      "total": 2500,
+      "currency": "EGP",
+      "items": [{ "productId": 1, "quantity": 2, "unitPrice": 1000, "lineTotal": 2000 }],
+      "placedAt": "2025-06-01T12:00:00.000Z"
+    }
+  ],
+  "meta": { "nextCursor": "2025-06-01T12:00:00.000Z", "hasMore": true, "count": 100 }
+}
+```
+
+This is the field-for-field shape of the live `order.placed` event's payload (`buildOrderPlacedPayload` in `order.service.ts`), deliberately — the backfill command on the analytics-service side unmarshals it into the same struct that event handler uses, so there is no second payload shape to keep in sync.
 
 Async traffic from `core-service` (cache invalidation) arrives over **RabbitMQ**, not HTTP. See `system-design.md` §5 for topology, `database-design.md` §3.12 for the dedupe log. Message envelope:
 
@@ -646,6 +673,7 @@ This service does **not** emit any outbound events to anyone in this milestone.
 | `IdempotencyConflict`             | 409  | shared        |
 | `InvalidStatusTransition`         | 409  | orders        |
 | `CancellationWindowExpired`       | 409  | orders        |
+| `InvalidBackfillYear`             | 400  | orders (internal) |
 | `OrderNotReady`                   | 409  | deliveries    |
 | `OrderAlreadyHasActiveDelivery`   | 409  | deliveries    |
 | `NoEligibleAgents`                | 409  | deliveries    |

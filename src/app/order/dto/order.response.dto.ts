@@ -132,6 +132,49 @@ export class OrderDetailResponseDTO {
     }
 }
 
+// One order's shape as fed to analytics-service's backfill command — the
+// exact same fields buildOrderPlacedPayload puts on the wire for a live
+// order.placed event (order.service.ts), so replaying this through
+// service.OnOrderPlaced on the analytics-service side can never drift from
+// what the live consumer would have produced for the same order.
+export class OrderHistoryItemResponseDTO {
+    productId!: number;
+    quantity!: number;
+    unitPrice!: number;
+    lineTotal!: number;
+
+    static from(item: OrderItemEntity): OrderHistoryItemResponseDTO {
+        const dto = new OrderHistoryItemResponseDTO();
+        dto.productId = item.productId;
+        dto.quantity = item.quantity;
+        dto.unitPrice = item.unitPriceSnapshot;
+        dto.lineTotal = item.lineTotal;
+        return dto;
+    }
+}
+
+export class OrderHistoryResponseDTO {
+    orderId!: string;
+    restaurantId!: number;
+    branchId!: number;
+    total!: number;
+    currency!: string;
+    items!: OrderHistoryItemResponseDTO[];
+    placedAt!: string;
+
+    static from(order: OrderEntity, items: OrderItemEntity[]): OrderHistoryResponseDTO {
+        const dto = new OrderHistoryResponseDTO();
+        dto.orderId = order.publicId;
+        dto.restaurantId = Number(order.restaurantId);
+        dto.branchId = Number(order.branchId);
+        dto.total = order.total;
+        dto.currency = order.currency;
+        dto.items = items.map(OrderHistoryItemResponseDTO.from);
+        dto.placedAt = order.createdAt.toISOString();
+        return dto;
+    }
+}
+
 function buildHistory(order: OrderEntity): Array<{status: OrderStatus; ts: string}> {
     const out: Array<{status: OrderStatus; ts: string}> = [];
     const push = (status: OrderStatus, ts: Date | null | undefined) => {

@@ -5,10 +5,11 @@ import {sendSuccess, sendPaginated} from "../../../lib/http/response";
 import {validateBody, isUuidLike} from "../../../lib/validation/validate";
 import {parsePaginationQuery} from "../../../lib/http/pagination/parse-query";
 import {RegionNotResolvedError} from "../../../lib/sharding/errors";
+import {assertRegion} from "../../../lib/sharding/regions";
 import {OrderService} from "../service/order.service";
 import {CreateOrderRequestDTO, UpdateOrderStatusRequestDTO} from "../dto/order.request.dto";
 import {OrderStatus} from "../enums";
-import {OrderNotFoundError} from "../errors";
+import {OrderNotFoundError, InvalidBackfillYearError} from "../errors";
 
 @injectable()
 export class OrderController {
@@ -99,6 +100,21 @@ export class OrderController {
                 [],
                 pagination,
             );
+            sendPaginated(res, result.data, result.meta as never);
+        } catch (err) {
+            next(err);
+        }
+    };
+
+    // Internal, service-to-service only (guarded by requireInternalApiKey in
+    // routes.ts, no user auth) — feeds analytics-service's backfill command.
+    listOrderHistory = async (req: Request, res: Response, next: NextFunction) => {
+        try {
+            const region = assertRegion(String(req.query.region ?? ""));
+            const year = Number(req.query.year);
+            if (!Number.isInteger(year)) throw InvalidBackfillYearError;
+            const pagination = parsePaginationQuery(req.query as Record<string, unknown>, ["createdAt"]);
+            const result = await this.orderService.listOrdersForBackfill(region, year, pagination);
             sendPaginated(res, result.data, result.meta as never);
         } catch (err) {
             next(err);

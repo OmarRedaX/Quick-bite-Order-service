@@ -261,3 +261,28 @@ export async function findOrdersByRestaurantBranch(
     const result = buildPaginationResult(rows, pagination.limit, pagination.sortBy);
     return {data: result.data.map(toEntity), meta: result.meta};
 }
+
+/**
+ * Every order that reached `placed` or later within [yearStart, yearEnd) —
+ * feeds analytics-service's backfill command (GET /api/internal/orders/history).
+ * Excludes `pending_payment`: those orders never fired `order.placed`, so
+ * backfilling them would fabricate revenue the live consumer never counted.
+ * No restaurant/branch scoping — this is a whole-shard export, one
+ * (region, year) page at a time.
+ */
+export async function findOrdersForBackfill(
+    yearStart: Date,
+    yearEnd: Date,
+    pagination: PaginationParams,
+    conn: Knex,
+): Promise<ListResult<OrderEntity>> {
+    const query = conn("orders")
+        .select(ORDER_COLUMNS as unknown as string[])
+        .where("status", "<>", OrderStatus.PENDING_PAYMENT)
+        .where("created_at", ">=", yearStart)
+        .where("created_at", "<", yearEnd);
+
+    const rows = await applyCursorPagination(query, pagination);
+    const result = buildPaginationResult(rows, pagination.limit, pagination.sortBy);
+    return {data: result.data.map(toEntity), meta: result.meta};
+}

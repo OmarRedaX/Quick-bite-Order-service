@@ -1,6 +1,7 @@
 import {Router} from "express";
 import {authenticate} from "../../lib/auth/guard";
 import {rbac, requireRestaurantMember, requireBranchAccess} from "../../lib/auth/rbac";
+import {requireInternalApiKey} from "../../lib/auth/api-key";
 import {idempotency} from "../../lib/idempotency/idempotency";
 import {withCache} from "../../lib/cache/withCache";
 import {requireRegion} from "../../lib/sharding/region-resolver";
@@ -66,6 +67,15 @@ orderRouter.patch(
     requireBranchAccess("branchId"),
     idempotency({strict: true}),
     orderController.updateStatus,
+);
+
+// ── Internal (service-to-service, no user auth) ─────────────────────────
+// Feeds analytics-service's backfill command (cmd/backfill-aggs) — pages
+// through one (region, year) at a time. See docs/api-contracts.md.
+orderRouter.get(
+    "/internal/orders/history",
+    requireInternalApiKey,
+    orderController.listOrderHistory,
 );
 
 // ── Admin override (any transition the matrix allows for `admin`) ───────

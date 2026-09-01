@@ -52,7 +52,7 @@ Dev tooling: `typescript`, `tsx` (dev/watch runner), `ts-node` (used by the Knex
 Everything below is implemented and reachable through a documented endpoint or background job — not aspirational.
 
 - **Order placement** (`POST /orders`) — validates the branch/products/stock and customer address against `core-service` (cached), computes totals in integer minor units, reserves stock, and writes the order + line items in one DB transaction. Supports both `cod` and `online` payment methods.
-- **A full order status lifecycle**, enforced per-actor:
+- **A full order status lifecycle**, enforced per-actor and, for restaurant staff, per-permission (a restaurant member can only drive the transitions their `restaurantRole`'s `orders:*` permissions actually grant — e.g. staff seeded with only `orders:accept` cannot also reject or cancel):
 
   ```
                    ┌─── pending_payment ───┐   (online only)
@@ -98,6 +98,7 @@ Everything below is implemented and reachable through a documented endpoint or b
 - **Inbound event consumption** — a RabbitMQ consumer binds to `core-service`'s `core.events` exchange (`product.#`, `branch.#`, `restaurant.#`, `rbac.#`) and invalidates the corresponding Redis cache entries, with `SETNX`-based dedupe and a dead-letter queue for poison messages.
 - **Outbound transactional outbox** — domain events are written to an `events_outbox` table in the same transaction as the change that produced them, then drained to a RabbitMQ exchange by a separate cron tick with `FOR UPDATE SKIP LOCKED` batching and publisher-confirm-gated dispatch.
 - **Idempotency** — every write endpoint that costs money or creates a resource requires an `Idempotency-Key` header, backed by Redis with a Postgres fallback table on the most critical paths (order placement, payouts).
+- **Internal, service-to-service endpoint** — `GET /internal/orders/history`, guarded by a shared `api-key` header (`requireInternalApiKey`, no user JWT), feeds `analytics-service`'s backfill command with every `placed`-or-later order for one `(region, year)`, in the exact same field shape as the live `order.placed` event.
 - **JWT auth shared with `core-service`**, and RBAC resolved through a Redis-cached read-through projection of `core-service`'s permission catalog rather than a local copy.
 - **zod-validated configuration** — a missing required environment variable fails the process at boot with a clear error instead of an obscure runtime crash later.
 
@@ -494,6 +495,11 @@ CORE_SERVICE_BASE_URL=http://localhost:3000
 CORE_INTERNAL_API_KEY=replace-with-core-services-internal-api-key
 CORE_HTTP_TIMEOUT_MS=5000
 
+# This service's own internal-api-key secret — guards GET /api/internal/...
+# routes (today: /internal/orders/history, read by analytics-service's
+# backfill command). Callers must send it back on the `api-key` header.
+INTERNAL_API_KEY=replace-with-a-shared-internal-secret
+
 WS_HEARTBEAT_SEC=30
 
 # Kashier v3 sandbox credentials — get these from your own Kashier sandbox
@@ -540,6 +546,7 @@ A couple of patterns worth knowing:
 - **Per-region shard config is dynamic**, not fixed keys in the zod schema: for every code in `REGIONS`, the app expects `DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (hot) and `ARCHIVE_DB_<region>_HOST/PORT/USERNAME/PASSWORD/NAME` (archive). Add a region to `REGIONS` and its two DB blocks, and it's live — no code change.
 - **Region is never in the JWT.** It's resolved per request from `?region=` query, then the `X-Region` header, then a `region` cookie.
 - **core-service unavailable is one stable, documented contract**: `503 { "error": "Core service unavailable" }`. It covers every way a core-service call can fail to get a good answer — connection refused, DNS failure, a request that runs past `CORE_HTTP_TIMEOUT_MS`, and core-service itself responding with a 5xx — all translated at the `core-client` boundary (`src/lib/core-client/core-client.ts`), never leaked as a raw network exception. Up to 3 attempts, 50ms→100ms backoff, and only that specific failure is retried — a real 4xx from core-service (`src/lib/core-client/errors.ts`'s `coreUpstreamError`) is returned as-is, not retried, not folded into 503.
+- **`INTERNAL_API_KEY` defaults to empty**, which means `requireInternalApiKey` (guarding this service's own `/internal/...` routes) returns `500` on every call until it's set to a real shared secret — same fail-closed shape as `core-service`'s equivalent guard.
 
 ---
 
@@ -638,7 +645,7 @@ npm run migrate:make -- create_something
 
 ## API Endpoints
 
-Every route is mounted under `/api` (see `src/routes.ts`). Auth is a JWT in the `access_token` cookie; region is resolved from `?region=` → `X-Region` header → `region` cookie. Write endpoints that create resources or move money require an `Idempotency-Key` header. This table is built directly from the `routes.ts` file in each module — see [`docs/api-contracts.md`](./docs/api-contracts.md) for full request/response bodies and error codes.
+Every route is mounted under `/api` (see `src/routes.ts`). Auth is a JWT, read from the `access_token` cookie or, falling back for callers that can't set cookies (service-to-service, mobile, curl/Postman), an `Authorization: Bearer <token>` header; region is resolved from `?region=` → `X-Region` header → `region` cookie. Write endpoints that create resources or move money require an `Idempotency-Key` header. Internal, service-to-service routes are the exception — no user JWT at all, just a shared `api-key` header, checked by `requireInternalApiKey` against `INTERNAL_API_KEY`. This table is built directly from the `routes.ts` file in each module — see [`docs/api-contracts.md`](./docs/api-contracts.md) for full request/response bodies and error codes.
 
 ### Orders (`src/app/order/routes.ts`)
 
@@ -651,6 +658,7 @@ Every route is mounted under `/api` (see `src/routes.ts`). Auth is a JWT in the 
 | `GET` | `/restaurants/:restaurantId/branches/:branchId/orders` | restaurant member (`orders:read`) / admin | Paginated order list, `?status=&from=&to=`. Cached 10s. |
 | `PATCH` | `/restaurants/:restaurantId/branches/:branchId/orders/:publicId/status` | restaurant member | Accept/reject/preparing/ready/cancel. Idempotent (strict). |
 | `PATCH` | `/admin/orders/:publicId/status` | admin | Any transition the state machine allows for admin. Idempotent (strict). |
+| `GET` | `/internal/orders/history` | internal (`api-key` header, no user JWT) | Paginated `placed`-or-later orders for one `(region, year)` — feeds `analytics-service`'s backfill command. |
 
 ### Payments (`src/app/payment/routes.ts`)
 
