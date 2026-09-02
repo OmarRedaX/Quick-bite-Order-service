@@ -124,6 +124,7 @@ Header: `Idempotency-Key` (strict).
   2. `commission` — restaurant → SYSTEM (src=ownerId, dst=NULL).
 - A `payout` is restaurant → bank: src=NULL (system holds the funds), dst=ownerId. The corresponding negative effect on the restaurant balance happens in the same trx.
 - A `refund` is SYSTEM → customer (online) or a void with no money movement (cod): we still insert a `refund` row for the audit trail.
+- On `delivered`, `service_fee` and `delivery_fee` (if non-zero) are booked restaurant → SYSTEM (src=ownerId, dst=NULL) — the customer paid both inside `total`, but they aren't the restaurant's money (the delivery fee is later paid out to the agent via `agent_earnings`).
 
 ---
 

@@ -121,7 +121,7 @@ export class SettlementService {
                 await createTransactionIdempotent({
                     region,
                     orderId: order.id,
-                    transactionType: TransactionType.ADJUSTMENT,
+                    transactionType: TransactionType.SERVICE_FEE,
                     method: TransactionMethod.SYSTEM,
                     providerId: null,
                     providerReferenceId: null,
@@ -141,7 +141,7 @@ export class SettlementService {
                 await createTransactionIdempotent({
                     region,
                     orderId: order.id,
-                    transactionType: TransactionType.ADJUSTMENT,
+                    transactionType: TransactionType.DELIVERY_FEE,
                     method: TransactionMethod.SYSTEM,
                     providerId: null,
                     providerReferenceId: null,

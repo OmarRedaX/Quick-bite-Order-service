@@ -244,7 +244,8 @@ CREATE TABLE transactions (
     region              TEXT NOT NULL,
     order_id            BIGINT NULL,                              -- nullable for payouts not tied to an order
     transaction_type    TEXT NOT NULL CHECK (transaction_type IN (
-                            'charge','refund','commission','payout','cod_collection','adjustment'
+                            'charge','refund','commission','payout','cod_collection',
+                            'service_fee','delivery_fee','adjustment'
                         )),
     method              TEXT NOT NULL CHECK (method IN ('online','cod','bank_transfer','system')),
     provider_id         INT NULL,                                 -- nullable for non-provider tx (e.g. commission)

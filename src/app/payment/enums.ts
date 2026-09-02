@@ -14,6 +14,8 @@ export enum TransactionType {
     COMMISSION = "commission",
     PAYOUT = "payout",
     COD_COLLECTION = "cod_collection",
+    SERVICE_FEE = "service_fee",
+    DELIVERY_FEE = "delivery_fee",
     ADJUSTMENT = "adjustment",
 }
 

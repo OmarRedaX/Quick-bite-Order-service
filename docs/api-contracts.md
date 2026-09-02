@@ -321,7 +321,7 @@ class PaymentInitResponseDTO {
 class PaymentResponseDTO {
   id: number;
   orderPublicId: string;
-  type: 'charge' | 'refund' | 'commission' | 'cod_collection' | 'payout' | 'adjustment';
+  type: 'charge' | 'refund' | 'commission' | 'cod_collection' | 'payout' | 'service_fee' | 'delivery_fee' | 'adjustment';
   method: 'online' | 'cod' | 'bank_transfer' | 'system';
   provider?: 'kashier';
   providerReferenceId?: string;
