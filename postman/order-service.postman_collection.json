@@ -1,0 +1,1602 @@
+{
+  "info": {
+    "name": "QuickBite — Order Service",
+    "description": "Folders match the modules in order-service/src/app/*. X-Region header is set per request. Idempotency-Key uses {{$randomUUID}}. Order public id is captured automatically by the 'Place order' tests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health (all shards)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{orderBaseUrl}}/health",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Order — Customer",
+      "item": [
+        {
+          "name": "Place order — COD (customer, EG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/orders",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Saves orderPublicId for downstream requests.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"branchId\": \"{{branchEgId}}\",\n  \"customerAddressId\": \"{{addressEgId}}\",\n  \"paymentMethod\": \"cod\",\n  \"items\": [\n    {\n      \"productId\": \"{{productIds_0}}\",\n      \"quantity\": 2\n    },\n    {\n      \"productId\": \"{{productIds_4}}\",\n      \"quantity\": 1\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 201 created\", () => pm.expect([200,201]).to.include(pm.response.code));",
+                  "const json = pm.response.json();",
+                  "const pid = json?.data?.publicId;",
+                  "if (pid) {",
+                  "    pm.collectionVariables.set(\"orderPublicId\", pid);",
+                  "    console.log(\"orderPublicId saved:\", pid);",
+                  "}",
+                  "if (json?.data?.payment?.redirectUrl) {",
+                  "    pm.collectionVariables.set(\"paymentRedirectUrl\", json.data.payment.redirectUrl);",
+                  "    pm.collectionVariables.set(\"paymentSessionId\", json.data.payment.sessionId);",
+                  "    console.log(\"redirectUrl:\", json.data.payment.redirectUrl);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Place order — ONLINE (customer, EG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/orders",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "description": "Creates a Kashier session. Response includes `payment.redirectUrl` — open it in a browser to actually pay. Saves paymentRedirectUrl.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"branchId\": \"{{branchEgId}}\",\n  \"customerAddressId\": \"{{addressEgId}}\",\n  \"paymentMethod\": \"online\",\n  \"items\": [\n    {\n      \"productId\": \"{{productIds_2}}\",\n      \"quantity\": 1\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 201 created\", () => pm.expect([200,201]).to.include(pm.response.code));",
+                  "const json = pm.response.json();",
+                  "const pid = json?.data?.publicId;",
+                  "if (pid) {",
+                  "    pm.collectionVariables.set(\"orderPublicId\", pid);",
+                  "    console.log(\"orderPublicId saved:\", pid);",
+                  "}",
+                  "if (json?.data?.payment?.redirectUrl) {",
+                  "    pm.collectionVariables.set(\"paymentRedirectUrl\", json.data.payment.redirectUrl);",
+                  "    pm.collectionVariables.set(\"paymentSessionId\", json.data.payment.sessionId);",
+                  "    console.log(\"redirectUrl:\", json.data.payment.redirectUrl);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Place order — COD (customer, KSA)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "ksa",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/orders",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "orders"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"branchId\": \"{{branchKsaId}}\",\n  \"customerAddressId\": \"{{addressKsaId}}\",\n  \"paymentMethod\": \"cod\",\n  \"items\": [\n    {\n      \"productId\": \"{{productIds_3}}\",\n      \"quantity\": 1\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 201 created\", () => pm.expect([200,201]).to.include(pm.response.code));",
+                  "const json = pm.response.json();",
+                  "const pid = json?.data?.publicId;",
+                  "if (pid) {",
+                  "    pm.collectionVariables.set(\"orderPublicId\", pid);",
+                  "    console.log(\"orderPublicId saved:\", pid);",
+                  "}",
+                  "if (json?.data?.payment?.redirectUrl) {",
+                  "    pm.collectionVariables.set(\"paymentRedirectUrl\", json.data.payment.redirectUrl);",
+                  "    pm.collectionVariables.set(\"paymentSessionId\", json.data.payment.sessionId);",
+                  "    console.log(\"redirectUrl:\", json.data.payment.redirectUrl);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /orders/:publicId (customer)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/orders/{{orderPublicId}}",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "orders",
+                "{{orderPublicId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /customer/orders (year=2026)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/customer/orders?year=2026&limit=20",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "customer",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "year",
+                  "value": "2026"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel order (customer, within 60s, pre-accept)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/customer/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "customer",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cancelled\",\n  \"reason\": \"changed my mind\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Order — Restaurant (owner)",
+      "description": "Restaurant-side transitions. Driven by `owner` because owner bypasses `requireBranchAccess`. Manager/staff are also valid restaurant roles, but in the current code the JWT carries `branchIds` as strings (pg BIGINT) and the middleware compares with `.includes(Number(...))` — so non-owner members get a false-negative 403. Use owner for the happy path; manager/staff variants are kept below for negative-RBAC checks.",
+      "item": [
+        {
+          "name": "GET branch order list (owner)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/branches/{{branchEgId}}/orders?limit=20",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches",
+                "{{branchEgId}}",
+                "orders"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "placed",
+                  "disabled": true
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Accept order (owner)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/branches/{{branchEgId}}/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches",
+                "{{branchEgId}}",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"accepted\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reject order (owner)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/branches/{{branchEgId}}/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches",
+                "{{branchEgId}}",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"rejected\",\n  \"reason\": \"out of stock\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Mark preparing (owner)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/branches/{{branchEgId}}/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches",
+                "{{branchEgId}}",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"preparing\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Mark ready (owner) → triggers assignment loop",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/branches/{{branchEgId}}/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches",
+                "{{branchEgId}}",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"ready\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel (restaurant owner) — preparing → cancelled",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/branches/{{branchEgId}}/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches",
+                "{{branchEgId}}",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cancelled\",\n  \"reason\": \"branch closing early\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Accept order AS MANAGER (expected 403 — non-owner branchIds bug)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{managerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/branches/{{branchEgId}}/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches",
+                "{{branchEgId}}",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "description": "Sanity check. With the current middleware this fails 403 because the JWT carries branchIds as strings. Useful as a negative test until the middleware is fixed.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"accepted\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Order — Admin override",
+      "item": [
+        {
+          "name": "Admin cancel order",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{adminAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/admin/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"cancelled\",\n  \"reason\": \"admin override\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Payment",
+      "item": [
+        {
+          "name": "GET /restaurants/:id/payments/:paymentId (owner)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/payments/{{paymentId}}",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "payments",
+                "{{paymentId}}"
+              ]
+            },
+            "description": "paymentId here is the transactions.id from a successful COD/online charge."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /payments/webhook/kashier (mock, no auth)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "x-kashier-signature",
+                "value": "REPLACE_WITH_HMAC",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/payments/webhook/kashier?region=eg",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "payments",
+                "webhook",
+                "kashier"
+              ],
+              "query": [
+                {
+                  "key": "region",
+                  "value": "eg"
+                }
+              ]
+            },
+            "description": "Public webhook. Real calls come from Kashier with a valid HMAC signature; this mock is for shape reference only — it WILL fail signature verification.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event\": \"pay\",\n  \"data\": {\n    \"merchantOrderId\": \"{{orderPublicId}}\",\n    \"kashierOrderId\": \"KSH-1\",\n    \"transactionId\": \"TXN-1\",\n    \"status\": \"SUCCESS\",\n    \"amount\": \"150.00\",\n    \"currency\": \"EGP\",\n    \"method\": \"card\",\n    \"signatureKeys\": [\n      \"merchantOrderId\",\n      \"transactionId\",\n      \"amount\",\n      \"currency\",\n      \"status\"\n    ]\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Agent",
+      "item": [
+        {
+          "name": "Presence ONLINE (agent EG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/presence/online",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "presence",
+                "online"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lat\": 30.047,\n  \"lng\": 31.24\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Presence PING (agent EG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/presence/ping",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "presence",
+                "ping"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lat\": 30.0475,\n  \"lng\": 31.241\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Presence OFFLINE (agent EG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/presence/offline",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "presence",
+                "offline"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Accept offer (agent EG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/orders/{{orderPublicId}}/accept",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "orders",
+                "{{orderPublicId}}",
+                "accept"
+              ]
+            },
+            "description": "Idempotent. Wins the order via SETNX claim. Cancels offer to other candidates."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject offer (agent EG)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/orders/{{orderPublicId}}/reject",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "orders",
+                "{{orderPublicId}}",
+                "reject"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Mark PICKED (agent EG)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"picked\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Mark DELIVERED (agent EG) — settles earnings + balance",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/orders/{{orderPublicId}}/status",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "orders",
+                "{{orderPublicId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"delivered\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /agents/tasks",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/tasks?",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "tasks"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "assigned",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /agents/earnings (MTD)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/agents/earnings",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "agents",
+                "earnings"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Assignment — Admin",
+      "item": [
+        {
+          "name": "Admin force-assign order to agent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{adminAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/admin/orders/{{orderPublicId}}/assign",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "orders",
+                "{{orderPublicId}}",
+                "assign"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"agentId\": \"{{agentEgUserId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Finance",
+      "item": [
+        {
+          "name": "GET /restaurants/:id/balance (owner)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/balance",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "balance"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /restaurants/:id/payouts (owner)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/restaurants/{{restaurantId}}/payouts",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "payouts"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /admin/restaurants/:id/payouts (admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{adminAccessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Region",
+                "value": "eg",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{orderBaseUrl}}/admin/restaurants/{{restaurantId}}/payouts",
+              "host": [
+                "{{orderBaseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "restaurants",
+                "{{restaurantId}}",
+                "payouts"
+              ]
+            },
+            "description": "Decrements the restaurant balance. Will fail if balance is below `amount`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 5000,\n  \"currency\": \"EGP\",\n  \"providerReferenceId\": \"BANK-REF-0001\",\n  \"note\": \"weekly payout\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "WebSocket (Socket.IO)",
+      "description": "Each request opens a raw WebSocket against the order-service socket.io engine.io endpoint:\n  ws://localhost:4000/socket.io/?EIO=4&transport=websocket\n\nAuth: the JWT is delivered via the `Cookie: access_token=...` header. The WS server's\n`ws-auth.ts` reads either `handshake.auth.token` (only set by socket.io clients) or the\n`access_token` cookie — query-string tokens are deliberately disabled.\n\nHow to use in Postman v10+:\n  1. Login the relevant role first in the Auth folder so the role-scoped token is set.\n  2. Open this request and click **Connect**.\n  3. In the 'New Message' panel, change the message type to **Text** and send the\n     Socket.IO protocol frames listed in each request's description.\n\nSocket.IO v4 protocol cheat-sheet (engine.io packets + socket.io payload):\n  '0'                                     ← server sends: engine.io OPEN  (auto)\n  '40'                                    → send to upgrade to Socket.IO  (NAMESPACE CONNECT)\n  '40{\"sid\":\"...\"}'                    ← server replies: CONNECT ack\n  '2'  /  '3'                             heartbeat ping / pong (every 25s, auto by Postman)\n  '42[\"subscribe\",\"<channel>\"]'        → send to subscribe to a permitted channel\n  '42[\"<event>\",<payload>]'             ← server broadcasts events with this shape\n\nChannels per role (validated by `permittedChannels` on the server):\n  customer:<userId>           — everyone gets their own\n  restaurant:<restaurantId>   — restaurant_user (any role)\n  branch:<branchId>           — restaurant_user with that branch in branchIds\n  agent:<userId>              — delivery_agent\n\nExpected server events (see TESTING_GUIDE.md §8):\n  hello { allowedChannels: string[] }       — sent immediately after CONNECT\n  subscribed { channel }                    — ack for your subscribe call\n  order.created  ← branch:<id>              — fired on place (COD) / pay success (online)\n  order.status_changed ← customer/branch    — every transition\n  task.offered   ← agent:<id>               — assignment loop picked this agent\n  task.assigned  ← agent:<winnerId>         — agent claimed the offer\n  offer.cancelled ← agent:<loserIds>        — other candidate won",
+      "item": [
+        {
+          "name": "WS — customer (subscribe customer:{{customerUserId}})",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "ws://localhost:4000/socket.io/?EIO=4&transport=websocket",
+              "protocol": "ws",
+              "host": [
+                "localhost"
+              ],
+              "port": "4000",
+              "path": [
+                "socket.io",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "EIO",
+                  "value": "4"
+                },
+                {
+                  "key": "transport",
+                  "value": "websocket"
+                }
+              ]
+            },
+            "description": "After connect, send these frames in order (one per message):\n  40\n  42[\"subscribe\",\"customer:{{customerUserId}}\"]\n\nThen place a COD order in the 'Order — Customer' folder — you'll see\n  42[\"order.status_changed\",{...}]  on every restaurant/agent transition."
+          },
+          "response": []
+        },
+        {
+          "name": "WS — owner (subscribe restaurant + branches)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "ws://localhost:4000/socket.io/?EIO=4&transport=websocket",
+              "protocol": "ws",
+              "host": [
+                "localhost"
+              ],
+              "port": "4000",
+              "path": [
+                "socket.io",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "EIO",
+                  "value": "4"
+                },
+                {
+                  "key": "transport",
+                  "value": "websocket"
+                }
+              ]
+            },
+            "description": "After connect, send:\n  40\n  42[\"subscribe\",\"restaurant:{{restaurantId}}\"]\n  42[\"subscribe\",\"branch:{{branchEgId}}\"]\n  42[\"subscribe\",\"branch:{{branchKsaId}}\"]\n\nOwner is in all branches by virtue of restaurantRole='owner'.\nYou'll see  42[\"order.created\",{...}]  on branch:<id> whenever a customer places an order."
+          },
+          "response": []
+        },
+        {
+          "name": "WS — agent EG (subscribe agent:{{agentEgUserId}})",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentEgAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "ws://localhost:4000/socket.io/?EIO=4&transport=websocket",
+              "protocol": "ws",
+              "host": [
+                "localhost"
+              ],
+              "port": "4000",
+              "path": [
+                "socket.io",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "EIO",
+                  "value": "4"
+                },
+                {
+                  "key": "transport",
+                  "value": "websocket"
+                }
+              ]
+            },
+            "description": "After connect, send:\n  40\n  42[\"subscribe\",\"agent:{{agentEgUserId}}\"]\n\nThen in another tab: POST /agents/presence/online + place + accept + ready an order.\nWithin the assignment-tick window (~10s) you should see:\n  42[\"task.offered\",{...}]   ← offer arrived\n  42[\"task.assigned\",{...}]  ← (if you call /accept and win)\n  42[\"offer.cancelled\",{...}]  ← (if a different candidate wins)"
+          },
+          "response": []
+        },
+        {
+          "name": "WS — agent KSA (subscribe agent:{{agentKsaUserId}})",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{agentKsaAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "ws://localhost:4000/socket.io/?EIO=4&transport=websocket",
+              "protocol": "ws",
+              "host": [
+                "localhost"
+              ],
+              "port": "4000",
+              "path": [
+                "socket.io",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "EIO",
+                  "value": "4"
+                },
+                {
+                  "key": "transport",
+                  "value": "websocket"
+                }
+              ]
+            },
+            "description": "Same as the EG agent, but for the KSA region.\n  40\n  42[\"subscribe\",\"agent:{{agentKsaUserId}}\"]"
+          },
+          "response": []
+        },
+        {
+          "name": "WS — admin (subscribe admin:alerts)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{adminAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "ws://localhost:4000/socket.io/?EIO=4&transport=websocket",
+              "protocol": "ws",
+              "host": [
+                "localhost"
+              ],
+              "port": "4000",
+              "path": [
+                "socket.io",
+                ""
+              ],
+              "query": [
+                {
+                  "key": "EIO",
+                  "value": "4"
+                },
+                {
+                  "key": "transport",
+                  "value": "websocket"
+                }
+              ]
+            },
+            "description": "After connect, send:\n  40\n  42[\"subscribe\",\"admin:alerts\"]\n\nReceives  42[\"assignment.exhausted\",{orderId, attempts}]  when the assignment loop\ngives up on an order after ASSIGNMENT_MAX_ATTEMPTS (default 3) tries."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

@@ -735,4 +735,14 @@ Some `docs/` files describe the original design (written before/during implement
 
 `npm test` runs [`vitest`](https://vitest.dev) against `tests/` — currently just `tests/core-client.test.ts`, covering the core-service-unavailable contract described above (success, a real 4xx, 5xx→503, connection-refused→503, timeout→503, retry-then-recover, and that an unrelated/programming error is neither retried nor folded into 503). No lint configuration exists in `package.json` yet. `play/` holds gitignored, throwaway scripts used to manually verify behavior against a real running stack (Postgres/Redis/RabbitMQ/core-service) — see [`play/README.md`](./play/README.md) for what each one checks. They're a reference for how to exercise the service directly, not something wired into CI.
 
+### Manual QA — Postman collection
+
+[`postman/`](./postman) has everything needed to exercise the full system by hand against a real running stack (`core-service` + `order-service` + Postgres/Redis/RabbitMQ):
+
+- [`QuickBite.postman_environment.json`](./postman/QuickBite.postman_environment.json) — base URLs and the token/id variables the requests read and write between steps.
+- [`core-service.postman_collection.json`](./postman/core-service.postman_collection.json) / [`order-service.postman_collection.json`](./postman/order-service.postman_collection.json) — every endpoint on each service, grouped by module, with test scripts that capture auth tokens and ids (order id, session id, ...) into the environment automatically.
+- [`postman/TESTING_GUIDE.md`](./postman/TESTING_GUIDE.md) — the run-book: bootstrap/seed, seeded account credentials, then a scripted request-by-request walkthrough of the COD happy path, the online/Kashier happy path (including the webhook), cancellations, multi-region (KSA/COD-only), RBAC negatives, the WebSocket smoke test, and the RabbitMQ/outbox check.
+
+Import the three collection/environment files into Postman, select the **QuickBite Local** environment, and follow the guide top to bottom for one full order lifecycle.
+
 No `LICENSE` file exists in this repository, so no license is stated here.

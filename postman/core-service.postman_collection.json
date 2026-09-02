@@ -1,0 +1,1828 @@
+{
+  "info": {
+    "name": "QuickBite — Core Service",
+    "description": "Folders match the modules in core-service/src/app/*. Login first to capture role tokens — every authenticated request reads its token from the role-scoped collection variable.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/health",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "Login per role captures the accessToken to a role-scoped variable used by the rest of the collection.",
+      "item": [
+        {
+          "name": "Register — new customer (sample)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/register",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "description": "Use this to register an EXTRA customer if you need one. The seed already inserted customer@quickbite.test, so duplicates will 409.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new.customer@quickbite.test\",\n  \"phone\": \"0109000099\",\n  \"name\": \"New Customer\",\n  \"password\": \"Customer@1234\",\n  \"role\": \"customer\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"customerAccessToken\", token);",
+                  "    console.log(\"[customer] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Register — new restaurant_user + restaurant (sample)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/register",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new.owner@quickbite.test\",\n  \"phone\": \"0109000098\",\n  \"name\": \"New Owner\",\n  \"password\": \"Owner@1234\",\n  \"role\": \"restaurant_user\",\n  \"restaurant\": {\n    \"name\": \"Burger Spot\",\n    \"primaryCountry\": \"eg\",\n    \"logoURL\": \"https://placehold.co/200?text=Burger\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Register — new delivery_agent (sample)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/register",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new.agent@quickbite.test\",\n  \"phone\": \"0109000097\",\n  \"name\": \"New Agent\",\n  \"password\": \"Agent@1234\",\n  \"role\": \"delivery_agent\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login — admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/login",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"adminAccessToken\", token);",
+                  "    console.log(\"[admin] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — customer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/login",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customerEmail}}\",\n  \"password\": \"{{customerPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"customerAccessToken\", token);",
+                  "    console.log(\"[customer] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — owner",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/login",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"ownerAccessToken\", token);",
+                  "    console.log(\"[owner] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — branch manager",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/login",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{managerEmail}}\",\n  \"password\": \"{{managerPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"managerAccessToken\", token);",
+                  "    console.log(\"[manager] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — staff",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/login",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{staffEmail}}\",\n  \"password\": \"{{staffPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"staffAccessToken\", token);",
+                  "    console.log(\"[staff] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — agent EG",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/login",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{agentEgEmail}}\",\n  \"password\": \"{{agentEgPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"agentEgAccessToken\", token);",
+                  "    console.log(\"[agentEg] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login — agent KSA",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/login",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{agentKsaEmail}}\",\n  \"password\": \"{{agentKsaPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"status 200\", () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.accessToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set(\"agentKsaAccessToken\", token);",
+                  "    console.log(\"[agentKsa] token saved (len=\"+token.length+\")\");",
+                  "} else {",
+                  "    console.warn(\"no accessToken in response\", json);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forget password (sends OTP email)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$randomUUID}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/forget-password",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "forget-password"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customerEmail}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Reset password (use OTP from email)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/reset-password",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "reset-password"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{customerEmail}}\",\n  \"otp\": \"000000\",\n  \"newPassword\": \"Customer@1234\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Accept invite (after member-create)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/accept-invite",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "accept-invite"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"newmember@quickbite.test\",\n  \"otp\": \"000000\",\n  \"newPassword\": \"Customer@1234\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/auth/refresh",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Reads refresh_token from cookies. Postman's cookie jar will carry it forward after login."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "User",
+      "item": [
+        {
+          "name": "GET /user/me (customer)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/user/me",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "user",
+                "me"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /user/me (owner)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/user/me",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "user",
+                "me"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /user/me",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/user/me",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "user",
+                "me"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Cathy Updated\",\n  \"phone\": \"0102222222\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Restaurant",
+      "item": [
+        {
+          "name": "GET /restaurants (public list)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants?limit=20&sortBy=createdAt",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt"
+                },
+                {
+                  "key": "cursor",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /restaurants/:id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /restaurants (admin only)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{adminAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"owner\": {\n    \"email\": \"extra.owner@quickbite.test\",\n    \"phone\": \"0103333333\",\n    \"name\": \"Extra Owner\",\n    \"password\": \"Owner@1234\"\n  },\n  \"name\": \"Pita House\",\n  \"primaryCountry\": \"eg\",\n  \"logoUrl\": \"https://placehold.co/200?text=Pita\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /restaurants/:id (owner)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Tasty Bites (updated)\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /restaurants/:id/status (admin)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{adminAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/status",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"active\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Branch",
+      "item": [
+        {
+          "name": "GET /branches/nearby (Cairo)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/branches/nearby?lat=30.0500&lng=31.2400",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "branches",
+                "nearby"
+              ],
+              "query": [
+                {
+                  "key": "lat",
+                  "value": "30.0500"
+                },
+                {
+                  "key": "lng",
+                  "value": "31.2400"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /restaurants/:id/branches",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/branches",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /restaurants/:id/branches (owner)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/branches",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "branches"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"countryCode\": \"eg\",\n  \"label\": \"Tasty Bites — Giza\",\n  \"addressText\": \"Pyramids Rd, Giza\",\n  \"lat\": 29.987,\n  \"lng\": 31.134,\n  \"opensAt\": \"08:00:00\",\n  \"closesAt\": \"23:59:00\",\n  \"deliveryRadius\": 12,\n  \"currency\": \"EGP\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /branches/:id (owner)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/branches/{{branchEgId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "branches",
+                "{{branchEgId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Tasty Bites — Cairo (updated)\",\n  \"acceptOrders\": true,\n  \"deliveryFee\": 1500\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /branches/:id/status (admin)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{adminAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/branches/{{branchEgId}}/status",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "branches",
+                "{{branchEgId}}",
+                "status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isActive\": true,\n  \"commission\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Product",
+      "item": [
+        {
+          "name": "GET /restaurants/:id/categories",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/categories",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "categories"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /branches/:id/products (public menu)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/branches/{{branchEgId}}/products",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "branches",
+                "{{branchEgId}}",
+                "products"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /products/:id (public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/products/{{productIds_0}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{productIds_0}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /restaurants/:id/products (owner)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/products",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "products"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /restaurants/:id/products (owner)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/products",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "products"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Veggie Wrap\",\n  \"description\": \"Lettuce, tomato, hummus\",\n  \"imageUrl\": \"https://placehold.co/300?text=Wrap\",\n  \"categoryName\": \"Burgers\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /products/:id?branchId= (owner)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/products/{{productIds_0}}?branchId={{branchEgId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "products",
+                "{{productIds_0}}"
+              ],
+              "query": [
+                {
+                  "key": "branchId",
+                  "value": "{{branchEgId}}"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"price\": 5500,\n  \"stock\": 60,\n  \"isAvailable\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Customer Address",
+      "item": [
+        {
+          "name": "GET /customer/addresses",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/customer/addresses",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "customer",
+                "addresses"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /customer/addresses",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/customer/addresses",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "customer",
+                "addresses"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Office — Cairo\",\n  \"country\": \"eg\",\n  \"city\": \"Cairo\",\n  \"street\": \"Smart Village Rd\",\n  \"building\": \"B4\",\n  \"apartmentNumber\": \"2\",\n  \"type\": \"office\",\n  \"lat\": 30.07,\n  \"lng\": 31.02,\n  \"isDefault\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /customer/addresses/:id",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/customer/addresses/{{addressEgId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "customer",
+                "addresses",
+                "{{addressEgId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Home — Updated\",\n  \"isDefault\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "DELETE /customer/addresses/:id",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{customerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/customer/addresses/{{addressEgId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "customer",
+                "addresses",
+                "{{addressEgId}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Members (RBAC)",
+      "item": [
+        {
+          "name": "GET /roles/owner/permissions (public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{coreBaseUrl}}/roles/owner/permissions",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "roles",
+                "owner",
+                "permissions"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /restaurants/:id/members (owner)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/members",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "members"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /restaurants/:id/members — invite branch_manager (owner)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/members",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "members"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"newmember@quickbite.test\",\n  \"name\": \"New Member\",\n  \"phoneNumber\": \"0107777777\",\n  \"role\": \"branch_manager\",\n  \"branchIds\": [\n    \"{{branchEgId}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PATCH /restaurants/:id/members/:memberId — suspend (owner)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/members/2",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "members",
+                "2"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"suspended\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "PUT /restaurants/:id/members/:memberId/branches (owner)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/members/2/branches",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "members",
+                "2",
+                "branches"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"branchIds\": [\n    \"{{branchEgId}}\",\n    \"{{branchKsaId}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "DELETE /restaurants/:id/members/:memberId (owner)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "access_token={{ownerAccessToken}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/restaurants/{{restaurantId}}/members/3",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "restaurants",
+                "{{restaurantId}}",
+                "members",
+                "3"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Internal (s2s) — uses api-key header",
+      "description": "These mirror what order-service calls during placement. Useful for spot-checking the contracts.",
+      "item": [
+        {
+          "name": "GET /internal/branches?ids=",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/internal/branches?ids={{branchEgId}},{{branchKsaId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "branches"
+              ],
+              "query": [
+                {
+                  "key": "ids",
+                  "value": "{{branchEgId}},{{branchKsaId}}"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /internal/branches/:id",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/internal/branches/{{branchEgId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "branches",
+                "{{branchEgId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /internal/branches/:id/products?ids=",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/internal/branches/{{branchEgId}}/products?ids={{productIds_0}},{{productIds_1}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "branches",
+                "{{branchEgId}}",
+                "products"
+              ],
+              "query": [
+                {
+                  "key": "ids",
+                  "value": "{{productIds_0}},{{productIds_1}}"
+                }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /internal/branches/:id/reserve-stock",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/internal/branches/{{branchEgId}}/reserve-stock",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "branches",
+                "{{branchEgId}}",
+                "reserve-stock"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productIds_0}}\",\n      \"quantity\": 1\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "POST /internal/branches/:id/release-stock",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/internal/branches/{{branchEgId}}/release-stock",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "branches",
+                "{{branchEgId}}",
+                "release-stock"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productIds_0}}\",\n      \"quantity\": 1\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /customer/addresses/internal/:id",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/customer/addresses/internal/{{addressEgId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "customer",
+                "addresses",
+                "internal",
+                "{{addressEgId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /user/internal/agents/:id",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/user/internal/agents/{{agentEgUserId}}",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "user",
+                "internal",
+                "agents",
+                "{{agentEgUserId}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GET /internal/rbac/permissions?role=owner",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "api-key",
+                "value": "{{internalApiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{coreBaseUrl}}/internal/rbac/permissions?role=owner",
+              "host": [
+                "{{coreBaseUrl}}"
+              ],
+              "path": [
+                "internal",
+                "rbac",
+                "permissions"
+              ],
+              "query": [
+                {
+                  "key": "role",
+                  "value": "owner"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
