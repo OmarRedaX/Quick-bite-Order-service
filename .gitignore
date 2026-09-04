@@ -12,3 +12,13 @@ play/
 
 # internal coding conventions — not for the public repo
 CLAUDE.md
+testing-implementation-plan.md
+notes.md
+
+# coverage output (unit + integration tiers, plus the ad-hoc nyc-merge scratch dirs)
+coverage/
+coverage-unit/
+coverage-integration/
+.coverage-merge-input/
+.coverage-merged/
+.coverage-merged-report/

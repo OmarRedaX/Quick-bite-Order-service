@@ -402,6 +402,24 @@ export class OrderService {
             throw err;
         }
 
+        // Release the stock reserved at placement, but only when the order
+        // never reached the kitchen: `preparing` means active cooking, so a
+        // cancellation from `preparing`/`ready`/`assigned` leaves stock
+        // decremented on purpose (the ingredients/capacity are already
+        // spent, whether or not the order completes). Best-effort, same
+        // fire-and-forget contract as placeOrder's own releaseStockSafe.
+        if (
+            (body.status === OrderStatus.CANCELLED || body.status === OrderStatus.REJECTED) &&
+            STOCK_RELEASE_ELIGIBLE_FROM_STATUSES.has(order.status)
+        ) {
+            const items = await findItemsByOrderIds([order.id], conn);
+            await this.releaseStockSafe(
+                order.branchId,
+                items.map((i) => ({productId: i.productId, quantity: i.quantity})),
+                order.publicId,
+            );
+        }
+
         await this.invalidateBranchOrdersCache(region, order.branchId);
 
         const payload = OrderStatusResponseDTO.from(updated);
@@ -530,6 +548,16 @@ const OUTBOX_EVENT_FOR_STATUS: Partial<Record<OrderStatus, string>> = {
     [OrderStatus.REJECTED]: EVENT_TYPES.ORDER_REJECTED,
     [OrderStatus.CANCELLED]: EVENT_TYPES.ORDER_CANCELLED,
 };
+
+// `from`-statuses where stock is still just a reservation, not yet spent —
+// see updateStatus's release-stock step. `preparing`/`ready`/`assigned` are
+// deliberately excluded: cooking has already started (or finished), so the
+// reserved unit is no longer available to give back regardless of outcome.
+const STOCK_RELEASE_ELIGIBLE_FROM_STATUSES = new Set<OrderStatus>([
+    OrderStatus.PENDING_PAYMENT,
+    OrderStatus.PLACED,
+    OrderStatus.ACCEPTED,
+]);
 
 // The `orders:*` permission a RESTAURANT_MEMBER needs to drive this
 // transition — see assertRestaurantMemberPermission. Any target not listed

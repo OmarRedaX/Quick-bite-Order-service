@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: quickbite_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/docker/01-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      retries: 10
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics","-q","ping"]
+      interval: 10s
+      retries: 10
+  order-service:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DB_eg_HOST: postgres
+      DB_eg_PASSWORD: password
+      DB_ksa_HOST: postgres
+      DB_ksa_PASSWORD: password
+      ARCHIVE_DB_ksa_HOST: postgres
+      ARCHIVE_DB_ksa_PASSWORD: password
+      ARCHIVE_DB_eg_HOST: postgres
+      ARCHIVE_DB_eg_PASSWORD: password
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    ports:
+      - "4000:4000"
+    depends_on:
+     postgres:
+        condition: service_healthy
+     redis:
+      condition: service_healthy
+     rabbitmq:
+        condition: service_healthy
+  order-worker:
+    build: .
+    command: ["node","dist/worker.js"]
+    env_file:
+      - .env
+    environment:
+      DB_eg_HOST: postgres
+      DB_eg_PASSWORD: password
+      DB_ksa_HOST: postgres
+      DB_ksa_PASSWORD: password
+      ARCHIVE_DB_ksa_HOST: postgres
+      ARCHIVE_DB_ksa_PASSWORD: password
+      ARCHIVE_DB_eg_HOST: postgres
+      ARCHIVE_DB_eg_PASSWORD: password
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+volumes:
+  postgres-data:

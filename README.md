@@ -43,7 +43,7 @@ Read directly from `package.json` and the code that uses each dependency.
 | IDs | `uuid` | client-facing order ids (`public_id`) |
 | Misc | `helmet`, `cors`, `cookie-parser`, `dotenv` | standard Express hardening/config middleware |
 
-Dev tooling: `typescript`, `tsx` (dev/watch runner), `ts-node` (used by the Knex CLI), `vitest` (test runner). No lint config in `package.json` — see [Testing](#testing).
+Dev tooling: `typescript`, `tsx` (dev/watch runner), `ts-node` (used by the Knex CLI), `jest` + `ts-jest` (test runner). No lint config in `package.json` — see [Testing](#testing).
 
 ---
 
@@ -733,7 +733,7 @@ Some `docs/` files describe the original design (written before/during implement
 
 ## Testing
 
-`npm test` runs [`vitest`](https://vitest.dev) against `tests/` — currently just `tests/core-client.test.ts`, covering the core-service-unavailable contract described above (success, a real 4xx, 5xx→503, connection-refused→503, timeout→503, retry-then-recover, and that an unrelated/programming error is neither retried nor folded into 503). No lint configuration exists in `package.json` yet. `play/` holds gitignored, throwaway scripts used to manually verify behavior against a real running stack (Postgres/Redis/RabbitMQ/core-service) — see [`play/README.md`](./play/README.md) for what each one checks. They're a reference for how to exercise the service directly, not something wired into CI.
+`npm test` runs [`jest`](https://jestjs.io) (via `ts-jest`) against `tests/unit/` — currently just `tests/unit/core-client/core-client.test.ts`, covering the core-service-unavailable contract described above (success, a real 4xx, 5xx→503, connection-refused→503, timeout→503, retry-then-recover, and that an unrelated/programming error is neither retried nor folded into 503). `npm run test:integration` runs a separate Jest config (`jest.integration.config.js`) against `tests/integration/`. No lint configuration exists in `package.json` yet. `play/` holds gitignored, throwaway scripts used to manually verify behavior against a real running stack (Postgres/Redis/RabbitMQ/core-service) — see [`play/README.md`](./play/README.md) for what each one checks. They're a reference for how to exercise the service directly, not something wired into CI.
 
 ### Manual QA — Postman collection
 

@@ -9,8 +9,7 @@ import {PermissionCacheService} from "../rbac/permission-cache.service";
 import {CoreDataCacheService} from "../../app/order/service/core-data-cache.service";
 import {OrderService} from "../../app/order/service/order.service";
 import {OrderController} from "../../app/order/controller/order.controller";
-import {env} from "../config/env";
-import {KashierClient} from "../../pkg/payments/kashier/kashier.client";
+import {kashierProvider} from "../../pkg/payments/init";
 import {PaymentService} from "../../app/payment/service/payment.service";
 import {KashierWebhookService} from "../../app/payment/service/kashier-webhook.service";
 import {PaymentController} from "../../app/payment/controller/payment.controller";
@@ -32,19 +31,8 @@ container.registerInstance(TOKENS.CoreClient, coreClient);
 container.registerSingleton<PermissionCacheService>(TOKENS.PermissionCacheService, PermissionCacheService);
 container.registerSingleton<CoreDataCacheService>(TOKENS.CoreDataCacheService, CoreDataCacheService);
 
-// pkg providers (constructed eagerly with env config)
-const kashierClient = new KashierClient({
-    baseUrl: env.kashier.baseUrl,
-    merchantId: env.kashier.merchantId,
-    apiKey: env.kashier.apiKey,
-    secretKey: env.kashier.secretKey,
-    paymentType: env.kashier.paymentType,
-    serverWebhookUrl: env.kashier.webhookUrl,
-    merchantRedirect: env.kashier.returnUrl,
-    failureRedirectEnabled: false,
-    sessionTimeoutSec: env.payments.sessionTimeoutMin * 60,
-});
-container.registerInstance(TOKENS.KashierProvider, kashierClient);
+// pkg providers
+container.registerInstance(TOKENS.KashierProvider, kashierProvider);
 
 // Domain: order
 container.registerSingleton<OrderService>(TOKENS.OrderService, OrderService);

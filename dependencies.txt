@@ -1,0 +1,4 @@
+node v
+postgres database v16/pg_partman
+redis
+rabbitmq

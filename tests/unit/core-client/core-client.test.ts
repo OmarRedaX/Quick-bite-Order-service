@@ -1,6 +1,5 @@
-import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
-import {CoreClient} from "../src/lib/core-client/core-client";
-import {AppError} from "../src/lib/error/AppError";
+import {CoreClient} from "../../../src/lib/core-client/core-client";
+import {AppError} from "../../../src/lib/error/AppError";
 
 // Isolated from env.ts / the real core-service on purpose — CoreClient takes
 // baseUrl/apiKey/timeoutMs as constructor args specifically so this doesn't
@@ -19,15 +18,17 @@ function jsonResponse(status: number, body: unknown, ok = status >= 200 && statu
 }
 
 describe("CoreClient — translate-at-the-boundary error contract", () => {
-    let fetchMock: ReturnType<typeof vi.fn>;
+    let fetchMock: jest.Mock;
+    let originalFetch: typeof fetch;
 
     beforeEach(() => {
-        fetchMock = vi.fn();
-        vi.stubGlobal("fetch", fetchMock);
+        originalFetch = global.fetch;
+        fetchMock = jest.fn();
+        global.fetch = fetchMock as unknown as typeof fetch;
     });
 
     afterEach(() => {
-        vi.unstubAllGlobals();
+        global.fetch = originalFetch;
     });
 
     it("returns parsed JSON on success, one fetch call", async () => {
@@ -68,9 +69,9 @@ describe("CoreClient — translate-at-the-boundary error contract", () => {
         const networkErr = new TypeError("fetch failed");
         fetchMock.mockRejectedValue(networkErr);
 
-        const err: AppError = await makeClient()
+        const err = (await makeClient()
             .request({method: "GET", path: "/x"})
-            .catch((e) => e);
+            .catch((e) => e)) as AppError;
 
         expect(err).toBeInstanceOf(AppError);
         expect(err.statusCode).toBe(503);
@@ -83,9 +84,9 @@ describe("CoreClient — translate-at-the-boundary error contract", () => {
         const timeoutErr = new DOMException("The operation was aborted due to timeout", "TimeoutError");
         fetchMock.mockRejectedValue(timeoutErr);
 
-        const err: AppError = await makeClient(50)
+        const err = (await makeClient(50)
             .request({method: "GET", path: "/x"})
-            .catch((e) => e);
+            .catch((e) => e)) as AppError;
 
         expect(err).toBeInstanceOf(AppError);
         expect(err.statusCode).toBe(503);
